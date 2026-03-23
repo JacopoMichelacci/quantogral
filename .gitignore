@@ -1,0 +1,40 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual env and env files
+.venv/
+.env
+*.env
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.whl
+
+# C/C++ build artifacts
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
+*.exe
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# Editor files
+.vscode/
+.idea/
+
+# OS file
+.DS_Store
+
+
+
+# pytest artifacts
+.coverage
