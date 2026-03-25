@@ -17,7 +17,7 @@ dependencies = [
     "pandas>=3.0.1",
     "polars>=1.39.3",
     "pybind11>=3.0.2",
-    "quantolib>=0.0.1",
+    "quantolib>=0.0.11",
     "tqdm>=4.67.3",
     "wrds>=3.1.6",
 ]
