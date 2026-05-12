@@ -7,6 +7,12 @@ __pycache__/
 .ruff_cache/
 .cache/
 
+# Node / JS
+node_modules/
+dist/
+.env.local
+.env.production
+
 # Virtual env and env files
 .venv/
 .env
