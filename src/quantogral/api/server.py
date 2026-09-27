@@ -10,8 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-DEFAULT_STRATEGIES_PATH = "./builder/strategies"
-DEFAULT_INDICATORS_PATH = "./builder/indicators"
+DEFAULT_BUILDER_PATH = "./cpp/include/builder"
 PROJECT_ROOT = Path(os.environ.get("QUANTOGRAL_ROOT", Path(__file__).resolve().parents[3]))
 CONFIG_PATH = PROJECT_ROOT / ".quantogral" / "config.json"
 
@@ -19,25 +18,25 @@ CONFIG_PATH = PROJECT_ROOT / ".quantogral" / "config.json"
 def read_config() -> tuple[dict[str, Any], bool]:
     """Return workspace config and whether a Builder path has been saved."""
     if not CONFIG_PATH.exists():
-        return {"builder": {"strategiesPath": DEFAULT_STRATEGIES_PATH}}, False
+        return {"builder": {"path": DEFAULT_BUILDER_PATH}}, False
     try:
         with CONFIG_PATH.open(encoding="utf-8") as config_file:
             config = json.load(config_file)
     except (json.JSONDecodeError, OSError):
-        return {"builder": {"strategiesPath": DEFAULT_STRATEGIES_PATH}}, False
+        return {"builder": {"path": DEFAULT_BUILDER_PATH}}, False
 
     builder = config.get("builder", {}) if isinstance(config, dict) else {}
-    strategies_path = builder.get("strategiesPath") if isinstance(builder, dict) else None
-    if not isinstance(strategies_path, str) or not strategies_path.strip():
-        return {"builder": {"strategiesPath": DEFAULT_STRATEGIES_PATH}}, False
-    return {"builder": {"strategiesPath": strategies_path}}, True
+    builder_path = builder.get("path") if isinstance(builder, dict) else None
+    if not isinstance(builder_path, str) or not builder_path.strip():
+        return {"builder": {"path": DEFAULT_BUILDER_PATH}}, False
+    return {"builder": {"path": builder_path}}, True
 
 
-def write_config(strategies_path: str) -> None:
+def write_config(builder_path: str) -> None:
     """Persist Builder configuration atomically with owner-only file permissions."""
     CONFIG_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     current_config, _ = read_config()
-    current_config["builder"] = {"strategiesPath": strategies_path}
+    current_config["builder"] = {"path": builder_path}
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=CONFIG_PATH.parent, delete=False) as temporary_file:
         json.dump(current_config, temporary_file, indent=2)
         temporary_file.write("\n")
@@ -47,7 +46,7 @@ def write_config(strategies_path: str) -> None:
 
 
 def scan_scripts(directory: Path, depth: int = 0) -> list[dict[str, Any]]:
-    """Return directory and Python/C++ script entries for the project explorer."""
+    """Return directory and C++ header entries for the project explorer."""
     if depth > 8:
         return []
 
@@ -66,7 +65,7 @@ def scan_scripts(directory: Path, depth: int = 0) -> list[dict[str, Any]]:
                 "type": "directory",
                 "children": scan_scripts(entry, depth + 1),
             })
-        elif entry.suffix.lower() in {".py", ".cpp"}:
+        elif entry.suffix.lower() == ".hpp":
             nodes.append({"name": entry.name, "type": "script"})
     return nodes
 
@@ -77,13 +76,12 @@ class ConfigHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/builder/tree":
             config, _ = read_config()
-            configured_path = Path(config["builder"]["strategiesPath"]).expanduser()
-            strategies_path = configured_path if configured_path.is_absolute() else PROJECT_ROOT / configured_path
-            indicators_path = PROJECT_ROOT / DEFAULT_INDICATORS_PATH
+            configured_path = Path(config["builder"]["path"]).expanduser()
+            builder_path = configured_path if configured_path.is_absolute() else PROJECT_ROOT / configured_path
             self.send_json({
                 "children": [
-                    {"name": "strategies", "type": "directory", "children": scan_scripts(strategies_path)},
-                    {"name": "indicators", "type": "directory", "children": scan_scripts(indicators_path)},
+                    {"name": "strategies", "type": "directory", "children": scan_scripts(builder_path / "strategies")},
+                    {"name": "indicators", "type": "directory", "children": scan_scripts(builder_path / "indicators")},
                 ],
             })
             return
@@ -101,15 +99,15 @@ class ConfigHandler(BaseHTTPRequestHandler):
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(content_length))
-            strategies_path = payload["strategiesPath"].strip()
+            builder_path = payload["path"].strip()
         except (AttributeError, json.JSONDecodeError, KeyError, ValueError):
-            self.send_json({"error": "strategiesPath must be a non-empty string."}, HTTPStatus.BAD_REQUEST)
+            self.send_json({"error": "path must be a non-empty string."}, HTTPStatus.BAD_REQUEST)
             return
-        if not strategies_path:
-            self.send_json({"error": "strategiesPath must be a non-empty string."}, HTTPStatus.BAD_REQUEST)
+        if not builder_path:
+            self.send_json({"error": "path must be a non-empty string."}, HTTPStatus.BAD_REQUEST)
             return
-        write_config(strategies_path)
-        self.send_json({"builder": {"strategiesPath": strategies_path}, "builderConfigured": True})
+        write_config(builder_path)
+        self.send_json({"builder": {"path": builder_path}, "builderConfigured": True})
 
     def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")

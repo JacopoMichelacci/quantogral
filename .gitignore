@@ -21,6 +21,9 @@ dist/
 /.quantogral/*
 !/.quantogral/.gitkeep
 
+# Thesis code archive: keep locally and select files manually for integration
+/ZZZ/
+
 # Virtual env and env files
 .venv/
 .env

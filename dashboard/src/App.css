@@ -36,6 +36,7 @@ h1 { margin: 10px 0 12px; color: #f5f5f1; font-size: clamp(2rem, 4vw, 3rem); fon
 .workspace-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 340px)); gap: 14px; margin-top: 36px; }
 .workspace-tile { display: flex; width: 100%; min-height: 118px; align-items: center; gap: 14px; padding: 20px; border: 1px solid #292d32; border-radius: 10px; color: #e8edf1; background: #121417; text-align: left; transition: border-color 120ms ease, background 120ms ease, transform 120ms ease; }
 .workspace-tile:hover { transform: translateY(-2px); border-color: #46505a; background: #171a1e; }
+.viewer-tile:hover { transform: none; border-color: #292d32; background: #121417; }
 .tile-icon { display: grid; width: 42px; height: 42px; flex: 0 0 42px; place-items: center; border: 1px solid #354657; border-radius: 9px; color: #79b9f7; background: #17232e; font-size: 1.4rem; }
 .tile-copy { display: grid; gap: 5px; }
 .tile-copy strong { font-size: .96rem; font-weight: 650; }
@@ -64,7 +65,7 @@ code { color: #b8d8fa; }
 .path-dialog h2 { margin: 10px 0 8px; color: #f5f5f1; font-size: 1.45rem; letter-spacing: -.025em; }
 .path-dialog > p { margin: 0; color: #aeb5bc; font-size: .9rem; line-height: 1.5; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
-.bottom-bar { position: fixed; z-index: 20; right: 0; bottom: 0; left: 0; display: flex; height: 57px; align-items: center; justify-content: center; gap: 6px; border-top: 1px solid #24272b; background: #111316; }
+.bottom-bar { position: fixed; z-index: 20; right: 0; bottom: 0; left: 0; display: flex; height: 57px; align-items: center; justify-content: center; gap: 18px; border-top: 1px solid #24272b; background: #111316; }
 .bottom-bar button { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 6px; padding: 8px 11px; color: #879099; background: transparent; font-size: .78rem; }
 .bottom-bar button:hover, .bottom-bar button.is-active { color: #e7edf2; background: #24272b; }
 @media (max-width: 640px) { .project-sidebar.is-expanded { width: 214px; } .main-content { padding: 48px 24px 88px; } .main-content.sidebar-is-open { margin-left: 0; } .path-dialog { padding: 20px; } }

@@ -1,34 +1,41 @@
 # Quantogral
 
-Quantogral is a source-available, self-hosted quantitative trading workstation for building, testing, evaluating, and eventually deploying trading strategies written in Python and C++.
+Quantogral is a source-available, self-hosted quantitative trading workstation for building, testing, evaluating, and eventually deploying C++ trading strategies and indicators. Python is used for research analysis, reports, and supporting tools.
 
 The goal is to provide a clean, extensible, local-first research environment where users can develop ideas, run reproducible backtests, analyze results in a polished web dashboard, and later connect strategies to paper or live trading infrastructure.
 
 ## Currently Available
 
 - A locally hosted React/Vite dashboard development server, started from the repository root with `./start.sh`.
-- A clean Home launch screen with separate Backtesting and Project Builder tiles. The collapsible project explorer appears on Project Builder and GridSearch, with distinct folder and script icons; it shows Python (`.py`) and C++ (`.cpp`) scripts from the Builder strategy and indicator directories. Main content shifts with the sidebar when it expands or collapses.
+- A clean Home launch screen with separate Backtesting and Code Workspace tiles. The Code Workspace includes a Viewer tile marked “In progress.” The collapsible project explorer appears on Code Workspace and GridSearch, with distinct folder and header icons; it shows C++ (`.hpp`) strategy and indicator headers from the Builder directories. Main content shifts with the sidebar when it expands or collapses.
 - A **More** screen in the main navigation listing Settings and Profile, both marked “In progress.”
-- Home offers Backtesting and Project Builder entry points. Backtesting offers a GridSearch tile and a dedicated GridSearch page; both areas are marked “In progress.”
-- Back and Home arrows connect Home, Backtesting, GridSearch, and Project Builder pages.
-- A Builder workspace that defaults the strategy script root to `./builder/strategies`. Hover over **Builder** in the project explorer and select its settings control to change and persist that path in local workspace state.
+- Home offers Backtesting and Code Workspace entry points. Backtesting offers a GridSearch tile and a dedicated GridSearch page; the GridSearch feature is marked “In progress.”
+- Back and Home arrows connect Home, Backtesting, GridSearch, and Code Workspace pages.
+- A Builder workspace that defaults its root to `./cpp/include/builder`, with `strategies/` and `indicators/` beneath it. Hover over **Builder** in the project explorer and select its settings control to change and persist the root path in local workspace state.
 - A local Python API that saves the selected Builder path in `.quantogral/config.json`; this workspace state stays on the user's machine and is ignored by Git.
+- An initial C++ strategy/indicator slice: shared market, order, price-field, and timestamp headers; header-only SMA and standard-deviation indicators; and an OHLCV moving-average-cross strategy. Non-template event-formatting code is under `cpp/src/core/`.
 - A default Builder directory structure:
 
   ```text
-  builder/
+  cpp/include/builder/
   ├── strategies/
-  │   ├── built-in/  # Strategies shipped and maintained by Quantogral
+  │   ├── strategy_base.hpp  # Shared interface for built-in and custom strategies
+  │   ├── built-in/
+  │   │   └── ma_cross.hpp
   │   └── custom/    # User-owned strategies; Quantogral never changes these
   └── indicators/
-      ├── built-in/  # Indicators shipped and maintained by Quantogral
+      ├── indicator_base.hpp  # Shared interface for built-in and custom indicators
+      ├── built-in/
+      │   ├── moving_average.hpp
+      │   └── standard_deviation.hpp
       └── custom/    # User-owned indicators; Quantogral never changes these
   ```
+- Shared non-Builder C++ dependencies live under `cpp/include/core/` and `cpp/include/utils/`; compiled core definitions live under `cpp/src/core/`.
 - A local `data/` directory for downloaded and imported market data. Its internal folder structure and naming are intentionally user-defined; its contents are ignored by Git by default.
 - A Python source package under `src/quantogral/`, with foundational quantitative-research dependencies and an initial Yahoo Finance OHLCV provider integration.
-- Empty base-module placeholders at `src/quantogral/strategies/base.py` and `src/quantogral/indicators/base.py` for the future customizable strategy and indicator interfaces.
+- Initial C++ strategy and indicator base headers, two built-in indicator templates, and one OHLCV built-in strategy have been brought into the project. The remaining thesis code stays archived separately until it is integrated deliberately.
 
-Quantogral is in very early development. Strategy management, backtesting, result analysis, paper trading, and broker connections are not implemented yet.
+Quantogral is in very early development. The C++ engine, strategy management, backtesting execution, result analysis, paper trading, and broker connections are not implemented yet.
 
 ## Product Vision
 
@@ -54,14 +61,14 @@ Quantogral is not intended to be a broker, data vendor, or hosted custody platfo
 
 Quantogral does not require a hosted account or cloud sync. To continue working on another machine, a user can archive the entire Quantogral project folder, transfer it, extract it on the other machine, and run `./start.sh`.
 
-The archive should include the hidden `.quantogral/` directory (local workspace configuration), `builder/custom/` (user strategies and indicators), and `data/` (local datasets) when those are needed on the second machine.
+The archive should include the hidden `.quantogral/` directory (local workspace configuration), `cpp/include/builder/strategies/custom/` and `cpp/include/builder/indicators/custom/` (user headers), and `data/` (local datasets) when those are needed on the second machine.
 
 ## Intended Workflow
 
-1. Create or add a strategy in Python or C++.
+1. Create or add a strategy in C++.
 2. Import or connect historical market data.
 3. Configure and run a reproducible backtest.
-4. Inspect trades, performance metrics, equity curves, logs, and risk statistics in the local dashboard.
+4. Analyze trades, performance metrics, equity curves, logs, and risk statistics with Python tools and the local dashboard.
 5. Compare runs and iterate through strategy parameters.
 6. Move a validated strategy to paper trading.
 7. Optionally connect the user's own broker account for live execution, with robust safety controls.
@@ -95,9 +102,11 @@ Connect to user-owned broker accounts through adapters. Live trading must includ
 ## Architectural Principles
 
 - **Local-first:** Quantogral runs on the user's machine or infrastructure; the browser dashboard is served locally.
-- **Separate source from data:** Quantogral code lives under `src/`; downloaded and imported local datasets live under `data/` and are not committed to Git.
-- **Code-first:** Strategies remain normal Python or C++ code rather than being trapped in a no-code interface.
-- **Single-file strategy scripts:** Python strategies and indicators use `.py` files; C++ strategies and indicators use `.cpp` files. Header files are not required as a paired file for each script.
+- **Separate source from data:** Python application code lives under `src/quantogral/`, C++ code under `cpp/`, and downloaded/imported local datasets under `data/` (not committed to Git).
+- **C++ strategy engine:** Strategies and indicators are C++ `.hpp` headers. Initial shared bases and starter algorithms are present; the full engine and runtime are still to be designed and implemented.
+- **Python for research analysis:** Python handles analysis, reporting, and supporting research tools around the C++ engine.
+- **Keep languages in their lanes:** C++ strategy/indicator headers and Builder folders belong under `cpp/include/builder/`; Python API, data-provider, analysis, and reporting code belongs under `src/quantogral/`.
+- **Header-based strategies and indicators:** Strategy and indicator implementations stay in `.hpp` files; they are header-based templates in the current thesis code.
 - **Dashboard as workflow layer:** The web UI orchestrates and explains the workflow; it is not only a static results viewer.
 - **Clear separation of concerns:** Backtests run as on-demand jobs, while paper/live execution runs in a durable service that survives browser closes and reconciles state with the broker.
 - **Research before execution:** The first releases prioritize a delightful and trustworthy backtesting experience over broad broker or data-provider abstractions.

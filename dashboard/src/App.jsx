@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import './App.css'
 
-const DEFAULT_STRATEGY_PATH = './builder/strategies'
+const DEFAULT_BUILDER_PATH = './cpp/include/builder'
 
 function FolderIcon() {
   return (
@@ -58,8 +58,8 @@ function App() {
   const [builderExpanded, setBuilderExpanded] = useState(false)
   const [builderTree, setBuilderTree] = useState([])
   const [expandedNodes, setExpandedNodes] = useState({})
-  const [strategyPath, setStrategyPath] = useState(DEFAULT_STRATEGY_PATH)
-  const [pathDraft, setPathDraft] = useState(DEFAULT_STRATEGY_PATH)
+  const [builderPath, setBuilderPath] = useState(DEFAULT_BUILDER_PATH)
+  const [pathDraft, setPathDraft] = useState(DEFAULT_BUILDER_PATH)
   const [pathDialogOpen, setPathDialogOpen] = useState(false)
   const [saveError, setSaveError] = useState('')
 
@@ -71,7 +71,7 @@ function App() {
         if (!response.ok) throw new Error('Could not load local workspace configuration.')
         const config = await response.json()
         if (isCurrent) {
-          setStrategyPath(config.builder.strategiesPath)
+          setBuilderPath(config.builder.path)
         }
       } catch (error) {
         if (isCurrent) setSaveError(error.message)
@@ -98,7 +98,7 @@ function App() {
         ])
       })
     return () => { isCurrent = false }
-  }, [strategyPath])
+  }, [builderPath])
 
   function toggleBuilder() {
     setBuilderExpanded((expanded) => !expanded)
@@ -109,24 +109,24 @@ function App() {
   }
 
   function openPathDialog() {
-    setPathDraft(strategyPath)
+    setPathDraft(builderPath)
     setSaveError('')
     setPathDialogOpen(true)
   }
 
-  async function saveStrategyPath(event) {
+  async function saveBuilderPath(event) {
     event.preventDefault()
-    const normalizedPath = pathDraft.trim() || DEFAULT_STRATEGY_PATH
+    const normalizedPath = pathDraft.trim() || DEFAULT_BUILDER_PATH
     setSaveError('')
     try {
       const response = await fetch('/api/config/builder', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategiesPath: normalizedPath }),
+        body: JSON.stringify({ path: normalizedPath }),
       })
       if (!response.ok) throw new Error('Could not save the local workspace configuration.')
       const config = await response.json()
-      setStrategyPath(config.builder.strategiesPath)
+      setBuilderPath(config.builder.path)
       setPathDialogOpen(false)
     } catch (error) {
       setSaveError(error.message)
@@ -182,12 +182,12 @@ function App() {
             <div className="workspace-tiles">
               <button className="workspace-tile" onClick={() => setActivePage('backtesting')} type="button">
                 <span className="tile-icon" aria-hidden="true">⌁</span>
-                <span className="tile-copy"><strong>Backtesting</strong><span>Backtesting workspace · In progress</span></span>
+                <span className="tile-copy"><strong>Backtesting</strong><span>Backtesting workspace</span></span>
                 <span className="tile-arrow" aria-hidden="true">→</span>
               </button>
               <button className="workspace-tile" onClick={() => { setBuilderExpanded(true); setActivePage('builder') }} type="button">
                 <span className="tile-icon" aria-hidden="true">▱</span>
-                <span className="tile-copy"><strong>Project Builder</strong><span>Strategy and indicator tools · In progress</span></span>
+                <span className="tile-copy"><strong>Code Workspace</strong><span>Strategy and indicator tools · In progress</span></span>
                 <span className="tile-arrow" aria-hidden="true">→</span>
               </button>
             </div>
@@ -215,9 +215,15 @@ function App() {
           <section className="home-view placeholder-view">
             <button aria-label="Back to Home" className="back-link" onClick={() => setActivePage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">WORKSPACE</div>
-            <h1>Project Builder</h1>
+            <h1>Code Workspace</h1>
             <p className="page-description">Strategy and indicator authoring tools.</p>
-            <span className="progress-badge">IN PROGRESS</span>
+            <div className="workspace-tiles">
+              <div className="workspace-tile viewer-tile">
+                <span className="tile-icon" aria-hidden="true">◫</span>
+                <span className="tile-copy"><strong>Viewer</strong><span>In progress</span></span>
+                <span className="progress-badge">IN PROGRESS</span>
+              </div>
+            </div>
           </section>
         ) : (
           <section className="more-view">
@@ -239,12 +245,12 @@ function App() {
         <div className="dialog-backdrop" onMouseDown={() => setPathDialogOpen(false)}>
           <section aria-labelledby="builder-path-title" aria-modal="true" className="path-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
             <div className="eyebrow">BUILDER</div>
-            <h2 id="builder-path-title">Set strategies folder</h2>
-            <p>Use an absolute path or a path relative to the Quantogral project root. Python `.py` and C++ `.cpp` files appear in the project tree.</p>
-            <form onSubmit={saveStrategyPath}>
-              <label htmlFor="strategy-path">Strategy scripts folder</label>
-              <input autoFocus id="strategy-path" onChange={(event) => setPathDraft(event.target.value)} placeholder="/full/path/to/your/strategies" spellCheck="false" type="text" value={pathDraft} />
-              <p className="input-help">Default: <code>./builder/strategies</code></p>
+            <h2 id="builder-path-title">Set Builder folder</h2>
+            <p>Choose the folder containing the `strategies/` and `indicators/` directories. Use an absolute path or a path relative to the Quantogral project root.</p>
+            <form onSubmit={saveBuilderPath}>
+              <label htmlFor="builder-path">Builder folder</label>
+              <input autoFocus id="builder-path" onChange={(event) => setPathDraft(event.target.value)} placeholder="/full/path/to/your/builder" spellCheck="false" type="text" value={pathDraft} />
+              <p className="input-help">Default: <code>./cpp/include/builder</code></p>
               {saveError && <p className="form-error">{saveError}</p>}
               <div className="dialog-actions">
                 <button className="secondary-button" onClick={() => setPathDialogOpen(false)} type="button">Cancel</button>
