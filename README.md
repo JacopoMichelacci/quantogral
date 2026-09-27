@@ -7,10 +7,10 @@ The goal is to provide a clean, extensible, local-first research environment whe
 ## Currently Available
 
 - A locally hosted React/Vite dashboard development server, started from the repository root with `./start.sh`.
-- A clean Home launch screen with separate Backtesting and Code Workspace tiles. The Code Workspace includes a Viewer tile marked “In progress.” The collapsible project explorer appears on Code Workspace and GridSearch, with distinct folder and header icons; it shows C++ (`.hpp`) strategy and indicator headers from the Builder directories. Main content shifts with the sidebar when it expands or collapses.
+- A clean Home launch screen with separate Backtesting and Code Workspace tiles. The Code Workspace includes a Viewer tile marked “In progress.” The collapsible project explorer appears on Code Workspace, Simple Backtesting, and GridSearch, with distinct folder and header icons; it shows C++ (`.hpp`) strategy and indicator headers from the Builder directories. Main content shifts with the sidebar when it expands or collapses.
 - A **More** screen in the main navigation listing Settings and Profile, both marked “In progress.”
-- Home offers Backtesting and Code Workspace entry points. Backtesting offers a GridSearch tile and a dedicated GridSearch page; the GridSearch feature is marked “In progress.”
-- Back and Home arrows connect Home, Backtesting, GridSearch, and Code Workspace pages.
+- Home offers Backtesting and Code Workspace entry points. Backtesting offers Simple Backtesting and GridSearch tiles, each with a dedicated page marked “In progress.”
+- Back and Home arrows connect Home, Backtesting, Simple Backtesting, GridSearch, and Code Workspace pages.
 - A Builder workspace that defaults its root to `./cpp/include/builder`, with `strategies/` and `indicators/` beneath it. Hover over **Builder** in the project explorer and select its settings control to change and persist the root path in local workspace state.
 - A local Python API that saves the selected Builder path in `.quantogral/config.json`; this workspace state stays on the user's machine and is ignored by Git.
 - An initial C++ strategy/indicator slice: shared market, order, price-field, and timestamp headers; header-only SMA and standard-deviation indicators; and an OHLCV moving-average-cross strategy. Non-template event-formatting code is under `cpp/src/core/`.

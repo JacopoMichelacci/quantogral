@@ -136,9 +136,10 @@ function App() {
   const isHome = activePage === 'home'
   const isBacktesting = activePage === 'backtesting'
   const isGridSearch = activePage === 'gridsearch'
+  const isSimpleBacktesting = activePage === 'simplebacktesting'
   const isBuilder = activePage === 'builder'
-  const isBacktestingSection = isBacktesting || isGridSearch
-  const hasProjectSidebar = isBuilder || isGridSearch
+  const isBacktestingSection = isBacktesting || isGridSearch || isSimpleBacktesting
+  const hasProjectSidebar = isBuilder || isGridSearch || isSimpleBacktesting
 
   return (
     <div className="app-shell">
@@ -198,11 +199,26 @@ function App() {
             <div className="eyebrow">RESEARCH</div>
             <h1>Backtesting</h1>
             <p className="page-description">Choose a backtesting method.</p>
-            <button className="workspace-tile" onClick={() => setActivePage('gridsearch')} type="button">
-              <span className="tile-icon" aria-hidden="true">▦</span>
-              <span className="tile-copy"><strong>GridSearch</strong><span>Parameter search · In progress</span></span>
-              <span className="tile-arrow" aria-hidden="true">→</span>
-            </button>
+            <div className="workspace-tiles">
+              <button className="workspace-tile" onClick={() => setActivePage('simplebacktesting')} type="button">
+                <span className="tile-icon" aria-hidden="true">▤</span>
+                <span className="tile-copy"><strong>Simple Backtesting</strong><span>Single-strategy run · In progress</span></span>
+                <span className="tile-arrow" aria-hidden="true">→</span>
+              </button>
+              <button className="workspace-tile" onClick={() => setActivePage('gridsearch')} type="button">
+                <span className="tile-icon" aria-hidden="true">▦</span>
+                <span className="tile-copy"><strong>GridSearch</strong><span>Parameter search · In progress</span></span>
+                <span className="tile-arrow" aria-hidden="true">→</span>
+              </button>
+            </div>
+          </section>
+        ) : isSimpleBacktesting ? (
+          <section className="home-view placeholder-view">
+            <button aria-label="Back to Backtesting" className="back-link" onClick={() => setActivePage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
+            <div className="eyebrow">BACKTESTING</div>
+            <h1>Simple Backtesting</h1>
+            <p className="page-description">Configure one C++ strategy and a market-data input, then run and inspect a backtest.</p>
+            <span className="progress-badge">IN PROGRESS</span>
           </section>
         ) : isGridSearch ? (
           <section className="home-view placeholder-view">
