@@ -135,10 +135,14 @@ function App() {
 
   const isHome = activePage === 'home'
   const isBacktesting = activePage === 'backtesting'
+  const isGridSearch = activePage === 'gridsearch'
+  const isBuilder = activePage === 'builder'
+  const isBacktestingSection = isBacktesting || isGridSearch
+  const hasProjectSidebar = isBuilder || isGridSearch
 
   return (
     <div className="app-shell">
-      {isHome && (
+      {hasProjectSidebar && (
         <aside className={`project-sidebar ${sidebarExpanded ? 'is-expanded' : 'is-collapsed'}`}>
           <div className="sidebar-header">
             {sidebarExpanded && <span className="sidebar-title">PROJECT</span>}
@@ -169,22 +173,50 @@ function App() {
         </aside>
       )}
 
-      <main className={`main-content ${isHome && sidebarExpanded ? 'sidebar-is-open' : ''}`}>
+      <main className={`main-content ${hasProjectSidebar ? (sidebarExpanded ? 'sidebar-is-open' : 'sidebar-is-collapsed') : ''}`}>
         {isHome ? (
           <section className="home-view">
             <div className="eyebrow">LOCAL WORKSPACE</div>
             <h1>Welcome to Quantogral</h1>
             <p className="page-description">Your local quantitative research workspace.</p>
-            <button className="workspace-tile" onClick={() => setActivePage('backtesting')} type="button">
-              <span className="tile-icon" aria-hidden="true">⌁</span>
-              <span className="tile-copy"><strong>Backtesting</strong><span>Backtesting workspace · In progress</span></span>
+            <div className="workspace-tiles">
+              <button className="workspace-tile" onClick={() => setActivePage('backtesting')} type="button">
+                <span className="tile-icon" aria-hidden="true">⌁</span>
+                <span className="tile-copy"><strong>Backtesting</strong><span>Backtesting workspace · In progress</span></span>
+                <span className="tile-arrow" aria-hidden="true">→</span>
+              </button>
+              <button className="workspace-tile" onClick={() => { setBuilderExpanded(true); setActivePage('builder') }} type="button">
+                <span className="tile-icon" aria-hidden="true">▱</span>
+                <span className="tile-copy"><strong>Project Builder</strong><span>Strategy and indicator tools · In progress</span></span>
+                <span className="tile-arrow" aria-hidden="true">→</span>
+              </button>
+            </div>
+          </section>
+        ) : isBacktesting ? (
+          <section className="home-view">
+            <button aria-label="Back to Home" className="back-link" onClick={() => setActivePage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
+            <div className="eyebrow">RESEARCH</div>
+            <h1>Backtesting</h1>
+            <p className="page-description">Choose a backtesting method.</p>
+            <button className="workspace-tile" onClick={() => setActivePage('gridsearch')} type="button">
+              <span className="tile-icon" aria-hidden="true">▦</span>
+              <span className="tile-copy"><strong>GridSearch</strong><span>Parameter search · In progress</span></span>
               <span className="tile-arrow" aria-hidden="true">→</span>
             </button>
           </section>
-        ) : isBacktesting ? (
+        ) : isGridSearch ? (
           <section className="home-view placeholder-view">
-            <div className="eyebrow">RESEARCH</div>
-            <h1>Backtesting</h1>
+            <button aria-label="Back to Backtesting" className="back-link" onClick={() => setActivePage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
+            <div className="eyebrow">BACKTESTING</div>
+            <h1>GridSearch</h1>
+            <span className="progress-badge">IN PROGRESS</span>
+          </section>
+        ) : isBuilder ? (
+          <section className="home-view placeholder-view">
+            <button aria-label="Back to Home" className="back-link" onClick={() => setActivePage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
+            <div className="eyebrow">WORKSPACE</div>
+            <h1>Project Builder</h1>
+            <p className="page-description">Strategy and indicator authoring tools.</p>
             <span className="progress-badge">IN PROGRESS</span>
           </section>
         ) : (
@@ -224,7 +256,7 @@ function App() {
       )}
 
       <nav aria-label="Main navigation" className="bottom-bar">
-        <button aria-label="Backtesting" className={isBacktesting ? 'is-active' : ''} onClick={() => setActivePage('backtesting')} type="button">
+        <button aria-label="Backtesting" className={isBacktestingSection ? 'is-active' : ''} onClick={() => setActivePage('backtesting')} type="button">
           <span aria-hidden="true">⌁</span><span>Backtesting</span>
         </button>
         <button aria-label="Home" className={isHome ? 'is-active' : ''} onClick={() => setActivePage('home')} type="button">

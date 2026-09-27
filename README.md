@@ -7,9 +7,10 @@ The goal is to provide a clean, extensible, local-first research environment whe
 ## Currently Available
 
 - A locally hosted React/Vite dashboard development server, started from the repository root with `./start.sh`.
-- A Home-only, collapsible project explorer with distinct folder and script icons. It shows folders and Python (`.py`) and C++ (`.cpp`) scripts from the Builder strategy and indicator directories.
+- A clean Home launch screen with separate Backtesting and Project Builder tiles. The collapsible project explorer appears on Project Builder and GridSearch, with distinct folder and script icons; it shows Python (`.py`) and C++ (`.cpp`) scripts from the Builder strategy and indicator directories. Main content shifts with the sidebar when it expands or collapses.
 - A **More** screen in the main navigation listing Settings and Profile, both marked “In progress.”
-- A home screen with a Backtesting entry point and a Backtesting navigation item; the Backtesting destination is marked “In progress.”
+- Home offers Backtesting and Project Builder entry points. Backtesting offers a GridSearch tile and a dedicated GridSearch page; both areas are marked “In progress.”
+- Back and Home arrows connect Home, Backtesting, GridSearch, and Project Builder pages.
 - A Builder workspace that defaults the strategy script root to `./builder/strategies`. Hover over **Builder** in the project explorer and select its settings control to change and persist that path in local workspace state.
 - A local Python API that saves the selected Builder path in `.quantogral/config.json`; this workspace state stays on the user's machine and is ignored by Git.
 - A default Builder directory structure:
