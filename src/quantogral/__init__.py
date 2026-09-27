@@ -1,0 +1,1 @@
+"""Quantogral's Python package."""

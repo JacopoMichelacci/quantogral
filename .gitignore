@@ -13,6 +13,10 @@ dist/
 .env.local
 .env.production
 
+# Local market data (keep the empty directory placeholder only)
+/data/*
+!/data/.gitkeep
+
 # Virtual env and env files
 .venv/
 .env
