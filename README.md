@@ -7,8 +7,11 @@ The goal is to provide a clean, extensible, local-first research environment whe
 ## Currently Available
 
 - A locally hosted React/Vite dashboard development server, started from the repository root with `./start.sh`.
-- A Home-only, collapsible project explorer with a **Builder** folder and `strategies` and `indicators` subfolders.
-- A first-run Builder setup screen that defaults the Python strategy root to `./builder/strategies` and remembers a chosen path in the browser.
+- A Home-only, collapsible project explorer with distinct folder and script icons. It shows folders and Python (`.py`) and C++ (`.cpp`) scripts from the Builder strategy and indicator directories.
+- A **More** screen in the main navigation listing Settings and Profile, both marked “In progress.”
+- A home screen with a Backtesting entry point and a Backtesting navigation item; the Backtesting destination is marked “In progress.”
+- A Builder workspace that defaults the strategy script root to `./builder/strategies`. Hover over **Builder** in the project explorer and select its settings control to change and persist that path in local workspace state.
+- A local Python API that saves the selected Builder path in `.quantogral/config.json`; this workspace state stays on the user's machine and is ignored by Git.
 - A default Builder directory structure:
 
   ```text
@@ -22,6 +25,7 @@ The goal is to provide a clean, extensible, local-first research environment whe
   ```
 - A local `data/` directory for downloaded and imported market data. Its internal folder structure and naming are intentionally user-defined; its contents are ignored by Git by default.
 - A Python source package under `src/quantogral/`, with foundational quantitative-research dependencies and an initial Yahoo Finance OHLCV provider integration.
+- Empty base-module placeholders at `src/quantogral/strategies/base.py` and `src/quantogral/indicators/base.py` for the future customizable strategy and indicator interfaces.
 
 Quantogral is in very early development. Strategy management, backtesting, result analysis, paper trading, and broker connections are not implemented yet.
 
@@ -44,6 +48,12 @@ Paper/live execution service → broker adapter → user's broker account
 ```
 
 Quantogral is not intended to be a broker, data vendor, or hosted custody platform. Users retain control of their code, data, infrastructure, and broker credentials.
+
+### Local portability
+
+Quantogral does not require a hosted account or cloud sync. To continue working on another machine, a user can archive the entire Quantogral project folder, transfer it, extract it on the other machine, and run `./start.sh`.
+
+The archive should include the hidden `.quantogral/` directory (local workspace configuration), `builder/custom/` (user strategies and indicators), and `data/` (local datasets) when those are needed on the second machine.
 
 ## Intended Workflow
 
@@ -86,6 +96,7 @@ Connect to user-owned broker accounts through adapters. Live trading must includ
 - **Local-first:** Quantogral runs on the user's machine or infrastructure; the browser dashboard is served locally.
 - **Separate source from data:** Quantogral code lives under `src/`; downloaded and imported local datasets live under `data/` and are not committed to Git.
 - **Code-first:** Strategies remain normal Python or C++ code rather than being trapped in a no-code interface.
+- **Single-file strategy scripts:** Python strategies and indicators use `.py` files; C++ strategies and indicators use `.cpp` files. Header files are not required as a paired file for each script.
 - **Dashboard as workflow layer:** The web UI orchestrates and explains the workflow; it is not only a static results viewer.
 - **Clear separation of concerns:** Backtests run as on-demand jobs, while paper/live execution runs in a durable service that survives browser closes and reconciles state with the broker.
 - **Research before execution:** The first releases prioritize a delightful and trustworthy backtesting experience over broad broker or data-provider abstractions.

@@ -17,6 +17,10 @@ dist/
 /data/*
 !/data/.gitkeep
 
+# Local workspace state (keep the empty directory placeholder only)
+/.quantogral/*
+!/.quantogral/.gitkeep
+
 # Virtual env and env files
 .venv/
 .env
