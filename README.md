@@ -7,13 +7,16 @@ The goal is to provide a clean, extensible, local-first research environment whe
 ## Currently Available
 
 - A locally hosted React/Vite dashboard development server, started from the repository root with `./start.sh`.
-- A clean Home launch screen with separate Backtesting and Code Workspace tiles. The Code Workspace includes a Viewer tile marked “In progress.” The collapsible project explorer appears on Code Workspace, Simple Backtesting, and GridSearch, with distinct folder and header icons; it shows C++ (`.hpp`) strategy and indicator headers from the Builder directories. Main content shifts with the sidebar when it expands or collapses.
-- A **More** screen in the main navigation listing Settings and Profile, both marked “In progress.”
-- Home offers Backtesting and Code Workspace entry points. Backtesting offers Simple Backtesting and GridSearch tiles, each with a dedicated page marked “In progress.”
+- A clean Home launch screen with Backtesting, Code Workspace, and Data Download tiles. Data Download opens a provider chooser with a Yahoo Finance tile and a provider page marked “In progress”; the project explorer is available on both pages. The Code Workspace includes a Viewer tile marked “In progress.” The collapsible project explorer appears on Code Workspace, Simple Backtesting, Data Download, Yahoo Finance, and the parked GridSearch screen, with distinct folder and header icons; supported C++ strategy headers can be dragged from it into a backtest.
+- A **More** screen in the main navigation. Settings opens a General page with a Light/Dark appearance choice saved in the local browser; Profile remains marked “In progress.” More also credits Jacopo Michelacci and links to his LinkedIn profile.
+- Home offers Backtesting and Code Workspace entry points. Backtesting offers Simple Backtesting and GridSearch. GridSearch remains a placeholder and is parked while the first single-run workflow is built.
+- Simple Backtesting lets users assemble multiple registered strategies and CSV/Parquet data files from the project explorer. Each strategy appears as a collapsed row that expands to its own base and strategy-specific settings. The current C++ runner still executes one strategy and one file per run; multi-item execution behavior remains to be built. CSV header rows are detected automatically. Its compact gear menu holds starting capital (default 100,000) and transaction cost (default 0 bps); saved values persist in the local browser.
+- The Builder settings control offers Builder-path configuration and Manage Compilation. Compile All runs from the compilation panel; Compile Selected switches the project explorer into strategy-selection mode with Cancel and Compile actions, plus a live list of selected strategies in the main pane. Compiled artifacts are kept under the ignored `.quantogral/build/` directory.
 - Back and Home arrows connect Home, Backtesting, Simple Backtesting, GridSearch, and Code Workspace pages.
-- A Builder workspace that defaults its root to `./cpp/include/builder`, with `strategies/` and `indicators/` beneath it. Hover over **Builder** in the project explorer and select its settings control to change and persist the root path in local workspace state.
+- A Builder workspace that defaults its root to `./cpp/include/builder`, with `strategies/` and `indicators/` beneath it. Hover over **Builder** in the project explorer and select its settings control to change the path or manage compilation.
+- The project explorer remembers its expanded/collapsed state, width, Builder expansion, and expanded folders in the local browser. Its expanded width is adjustable from 220 to 420 pixels. Folder/file settings actions can create folders (`foldername/`) or empty files (`filename.ext`) at that level and rename existing items without overwriting; changes are restricted to the configured Builder root or project `data/` folder. The root-level `data/` folder shows the project's local files and subfolders. **Collapse all** restores the default tree view: Builder expanded, strategy and indicator folders collapsed, and `data/` collapsed.
 - A local Python API that saves the selected Builder path in `.quantogral/config.json`; this workspace state stays on the user's machine and is ignored by Git.
-- An initial C++ strategy/indicator slice: shared market, order, price-field, and timestamp headers; header-only SMA and standard-deviation indicators; and an OHLCV moving-average-cross strategy. Non-template event-formatting code is under `cpp/src/core/`.
+- An initial C++ strategy/indicator slice: shared market, order, price-field, and timestamp headers; header-only SMA and standard-deviation indicators; and an OHLCV moving-average-cross strategy. A compiled C++ runner and initial backtest engine are under `cpp/`.
 - A default Builder directory structure:
 
   ```text
@@ -35,7 +38,7 @@ The goal is to provide a clean, extensible, local-first research environment whe
 - A Python source package under `src/quantogral/`, with foundational quantitative-research dependencies and an initial Yahoo Finance OHLCV provider integration.
 - Initial C++ strategy and indicator base headers, two built-in indicator templates, and one OHLCV built-in strategy have been brought into the project. The remaining thesis code stays archived separately until it is integrated deliberately.
 
-Quantogral is in very early development. The C++ engine, strategy management, backtesting execution, result analysis, paper trading, and broker connections are not implemented yet.
+Quantogral is in very early development. Simple Backtesting is an initial working slice for one registered OHLCV strategy; broader strategy registration/compilation, flexible data discovery, portfolio backtesting, result analysis, paper trading, and broker connections remain to be built.
 
 ## Product Vision
 
@@ -103,7 +106,7 @@ Connect to user-owned broker accounts through adapters. Live trading must includ
 
 - **Local-first:** Quantogral runs on the user's machine or infrastructure; the browser dashboard is served locally.
 - **Separate source from data:** Python application code lives under `src/quantogral/`, C++ code under `cpp/`, and downloaded/imported local datasets under `data/` (not committed to Git).
-- **C++ strategy engine:** Strategies and indicators are C++ `.hpp` headers. Initial shared bases and starter algorithms are present; the full engine and runtime are still to be designed and implemented.
+- **C++ strategy engine:** Strategies and indicators are C++ `.hpp` headers. The initial Simple Backtesting runner compiles registered strategies and executes them locally; broader custom-strategy registration and runtime management remain future work.
 - **Python for research analysis:** Python handles analysis, reporting, and supporting research tools around the C++ engine.
 - **Keep languages in their lanes:** C++ strategy/indicator headers and Builder folders belong under `cpp/include/builder/`; Python API, data-provider, analysis, and reporting code belongs under `src/quantogral/`.
 - **Header-based strategies and indicators:** Strategy and indicator implementations stay in `.hpp` files; they are header-based templates in the current thesis code.
