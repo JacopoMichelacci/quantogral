@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 const DEFAULT_BUILDER_PATH = './cpp/include/builder'
@@ -7,6 +7,48 @@ const EXPLORER_SETTINGS_KEY = 'quantogral.projectExplorer.settings'
 const SITE_THEME_KEY = 'quantogral.siteTheme'
 const SIDEBAR_MIN_WIDTH = 220
 const SIDEBAR_MAX_WIDTH = 420
+
+function parseCsvPreview(content, edgeRows = 100) {
+  let header = null
+  let dataRowCount = 0
+  const firstRows = []
+  const lastRows = []
+  let row = []
+  let cell = ''
+  let quoted = false
+  const finishRow = () => {
+    row.push(cell)
+    const values = row
+    row = []
+    cell = ''
+    if (header === null) {
+      header = values
+      return
+    }
+    dataRowCount += 1
+    const record = { lineNumber: dataRowCount + 1, values }
+    if (firstRows.length < edgeRows * 2) firstRows.push(record)
+    lastRows.push(record)
+    if (lastRows.length > edgeRows) lastRows.shift()
+  }
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index]
+    if (character === '"') {
+      if (quoted && content[index + 1] === '"') { cell += '"'; index += 1 }
+      else quoted = !quoted
+    } else if (character === ',' && !quoted) {
+      row.push(cell); cell = ''
+    } else if ((character === '\n' || character === '\r') && !quoted) {
+      if (character === '\r' && content[index + 1] === '\n') index += 1
+      finishRow()
+    } else {
+      cell += character
+    }
+  }
+  if (cell.length || row.length || header === null && content.length > 0) finishRow()
+  const visibleRows = dataRowCount <= edgeRows * 2 ? firstRows.slice(0, dataRowCount) : [...firstRows.slice(0, edgeRows), ...lastRows]
+  return { header: header ?? [], rows: visibleRows, dataRowCount, omittedRowCount: Math.max(0, dataRowCount - visibleRows.length) }
+}
 
 function loadExplorerSettings() {
   try {
@@ -212,6 +254,7 @@ function App() {
   const [itemDialogError, setItemDialogError] = useState('')
   const [saveError, setSaveError] = useState('')
   const [fileEditor, setFileEditor] = useState(null)
+  const csvPreviewRows = useMemo(() => fileEditor?.csvTableView ? parseCsvPreview(fileEditor.content) : [], [fileEditor])
   const [editorSaving, setEditorSaving] = useState(false)
   const [editorError, setEditorError] = useState('')
   const [unsavedPromptOpen, setUnsavedPromptOpen] = useState(false)
@@ -236,6 +279,7 @@ function App() {
   const strategyInstanceCount = useRef(0)
   const dataInstanceCount = useRef(0)
   const fileOpenRequest = useRef(0)
+  const editorGutterRef = useRef(null)
   const resizePointerId = useRef(null)
   const compileNoticeFadeTimer = useRef(null)
   const compileNoticeClearTimer = useRef(null)
@@ -497,14 +541,14 @@ function App() {
       const result = await readApiJson(response, 'workspace file')
       if (!response.ok) throw new Error(result.error || 'Could not open this file.')
       if (requestId !== fileOpenRequest.current) return
-      setFileEditor({ ...file, format: result.format, content: result.content, savedContent: result.content, loading: false, rows: result.rows, columns: result.columns })
+      setFileEditor({ ...file, format: result.format, content: result.content, savedContent: result.content, loading: false, rows: result.rows, columns: result.columns, csvTableView: file.name.toLowerCase().endsWith('.csv') })
     } catch (error) {
       if (requestId !== fileOpenRequest.current) return
       setFileEditor({ ...file, format: '', content: '', savedContent: '', loading: false, error: error.message })
     }
   }
 
-  async function persistWorkspaceFile(editor) {
+  const persistWorkspaceFile = useCallback(async (editor) => {
     const response = await fetch('/api/workspace/file', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -513,9 +557,9 @@ function App() {
     const result = await readApiJson(response, 'workspace file save')
     if (!response.ok) throw new Error(result.error || 'Could not save this file.')
     return result
-  }
+  }, [])
 
-  async function saveCurrentWorkspaceFile() {
+  const saveCurrentWorkspaceFile = useCallback(async () => {
     if (!fileEditor || fileEditor.loading) return false
     const contentToSave = fileEditor.content
     setEditorSaving(true)
@@ -530,7 +574,19 @@ function App() {
     } finally {
       setEditorSaving(false)
     }
-  }
+  }, [fileEditor, persistWorkspaceFile])
+
+  useEffect(() => {
+    if (!fileEditor) return undefined
+    const saveOnShortcut = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault()
+        if (!editorSaving && !fileEditor.loading && fileEditor.content !== fileEditor.savedContent) saveCurrentWorkspaceFile()
+      }
+    }
+    window.addEventListener('keydown', saveOnShortcut)
+    return () => window.removeEventListener('keydown', saveOnShortcut)
+  }, [fileEditor, editorSaving, saveCurrentWorkspaceFile])
 
   function applyEditorAction(action) {
     if (!action) return
@@ -1161,7 +1217,7 @@ function App() {
             <section className="file-editor-view">
               <div className="file-editor-toolbar">
                 <button className="back-link" onClick={() => requestEditorAction({ type: 'close' })} title="Close file" type="button"><span aria-hidden="true">←</span> Code Workspace</button>
-                <span className="file-editor-status">{fileEditor.loading ? 'Opening…' : fileEditor.content !== fileEditor.savedContent ? 'Unsaved changes' : 'Saved'}</span>
+                <span className="file-editor-status">{fileEditor.loading ? 'Opening…' : fileEditor.content !== fileEditor.savedContent ? 'Unsaved changes' : 'Saved'} <span className="editor-shortcut-hint">· Ctrl/⌘ S to save</span></span>
               </div>
               <div className="eyebrow">{fileEditor.scope === 'data' ? 'DATA FILE' : 'SOURCE FILE'}</div>
               <h1>{fileEditor.name}</h1>
@@ -1169,7 +1225,27 @@ function App() {
               {fileEditor.format === 'parquet-json' && <p className="file-editor-help">Editing Parquet rows as JSON. Keep the original columns and value types; up to 5,000 rows are supported.</p>}
               {fileEditor.error && <p className="form-error">{fileEditor.error}</p>}
               {editorError && <p className="form-error">{editorError}</p>}
-              <textarea aria-label={`Edit ${fileEditor.name}`} className="workspace-file-editor" disabled={fileEditor.loading || editorSaving || Boolean(fileEditor.error)} onChange={(event) => { setFileEditor((current) => ({ ...current, content: event.target.value })); setEditorError('') }} spellCheck={false} value={fileEditor.content} />
+              {fileEditor.scope === 'data' && fileEditor.name.toLowerCase().endsWith('.csv') && <div aria-label="CSV display mode" className="csv-view-toggle"><button aria-pressed={fileEditor.csvTableView} className={fileEditor.csvTableView ? 'is-active' : ''} onClick={() => setFileEditor((current) => ({ ...current, csvTableView: true }))} type="button">Table view</button><button aria-pressed={!fileEditor.csvTableView} className={!fileEditor.csvTableView ? 'is-active' : ''} onClick={() => setFileEditor((current) => ({ ...current, csvTableView: false }))} type="button">Text editor</button></div>}
+              {fileEditor.csvTableView ? (
+                <div className="csv-table-frame">
+                  <div aria-label="CSV table preview" className="csv-table-viewport" role="region" tabIndex="0">
+                    <table className="csv-data-table">
+                      <thead><tr><th className="csv-row-number">#</th>{csvPreviewRows.header.map((column, index) => <th key={index}>{column || `Column ${index + 1}`}</th>)}</tr></thead>
+                      <tbody>
+                        {csvPreviewRows.rows.slice(0, csvPreviewRows.omittedRowCount ? 100 : undefined).map((row) => <tr key={row.lineNumber}><td className="csv-row-number">{row.lineNumber}</td>{Array.from({ length: Math.max(csvPreviewRows.header.length, row.values.length) }, (_, columnIndex) => <td key={columnIndex}>{row.values[columnIndex] ?? ''}</td>)}</tr>)}
+                        {csvPreviewRows.omittedRowCount > 0 && <tr className="csv-omitted-rows"><td colSpan={csvPreviewRows.header.length + 1}>… {csvPreviewRows.omittedRowCount.toLocaleString()} rows omitted …</td></tr>}
+                        {csvPreviewRows.omittedRowCount > 0 && csvPreviewRows.rows.slice(100).map((row) => <tr key={row.lineNumber}><td className="csv-row-number">{row.lineNumber}</td>{Array.from({ length: Math.max(csvPreviewRows.header.length, row.values.length) }, (_, columnIndex) => <td key={columnIndex}>{row.values[columnIndex] ?? ''}</td>)}</tr>)}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="csv-preview-note">{csvPreviewRows.omittedRowCount > 0 ? `Showing first 100 and last 100 of ${csvPreviewRows.dataRowCount.toLocaleString()} data rows.` : `Showing all ${csvPreviewRows.dataRowCount.toLocaleString()} data rows.`} Switch to Text editor to edit the full file.</div>
+                </div>
+              ) : (
+                <div className={`workspace-editor-shell ${fileEditor.scope === 'data' ? 'is-data-editor' : 'is-code-editor'}`}>
+                  <div aria-hidden="true" className="workspace-editor-gutter" ref={editorGutterRef}>{Array.from({ length: Math.max(1, fileEditor.content.split('\n').length) }, (_, index) => <span key={index}>{index + 1}</span>)}</div>
+                  <textarea aria-label={`Edit ${fileEditor.name}`} className="workspace-file-editor" disabled={fileEditor.loading || editorSaving || Boolean(fileEditor.error)} onChange={(event) => { setFileEditor((current) => ({ ...current, content: event.target.value })); setEditorError('') }} onScroll={(event) => { if (editorGutterRef.current) editorGutterRef.current.scrollTop = event.currentTarget.scrollTop }} spellCheck={false} value={fileEditor.content} wrap="off" />
+                </div>
+              )}
               <div className="file-editor-actions"><span>{fileEditor.format === 'parquet-json' ? 'Parquet · editable JSON table' : 'Text · UTF-8'}</span><button className="secondary-button" onClick={() => requestEditorAction({ type: 'close' })} type="button">Close file</button><button className="primary-button" disabled={fileEditor.loading || editorSaving || Boolean(fileEditor.error) || fileEditor.content === fileEditor.savedContent} onClick={saveCurrentWorkspaceFile} type="button">{editorSaving ? 'Saving…' : 'Save'}</button></div>
             </section>
           ) : (

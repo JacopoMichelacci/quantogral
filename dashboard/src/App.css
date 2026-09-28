@@ -83,11 +83,29 @@ button { cursor: pointer; }
 .file-editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .file-editor-toolbar .back-link { display: inline-flex; align-items: center; gap: 7px; }
 .file-editor-status { color: #929ba4; font-size: .74rem; }
+.editor-shortcut-hint { color: #747e87; }
 .file-editor-path { margin: -7px 0 0; color: #89939c; font-size: .75rem; }
 .file-editor-path code { overflow-wrap: anywhere; }
 .file-editor-help { margin: 0; color: #aeb5bc; font-size: .78rem; line-height: 1.5; }
-.workspace-file-editor { width: 100%; min-height: min(62vh, 720px); resize: vertical; padding: 16px; border: 1px solid #30363d; border-radius: 7px; color: #dce3e8; background: #0e1012; font-family: SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: .78rem; line-height: 1.55; tab-size: 4; }
-.workspace-file-editor:focus { border-color: #4c88b8; outline: 2px solid rgb(76 136 184 / 22%); }
+.workspace-editor-shell { display: grid; width: 100%; height: min(62vh, 720px); min-height: 260px; grid-template-columns: max-content minmax(0, 1fr); overflow: hidden; resize: vertical; border: 1px solid #30363d; border-radius: 7px; background: #0e1012; }
+.workspace-editor-gutter { overflow: hidden; padding: 16px 10px; border-right: 1px solid #272d32; color: #6f7982; background: #111417; font-family: SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: .78rem; line-height: 1.55; text-align: right; user-select: none; }
+.workspace-editor-gutter span { display: block; }
+.workspace-file-editor { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; resize: none; overflow: auto; padding: 16px; border: 0; border-radius: 0; color: #dce3e8; background: #0e1012; font-family: SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: .78rem; line-height: 1.55; tab-size: 4; white-space: pre; overflow-wrap: normal; word-break: normal; }
+.workspace-editor-shell:focus-within { border-color: #4c88b8; outline: 2px solid rgb(76 136 184 / 22%); }
+.workspace-editor-shell.is-data-editor .workspace-file-editor { background: repeating-linear-gradient(to bottom, #0e1012 0, #0e1012 1.209rem, #121619 1.209rem, #121619 2.418rem); background-attachment: local; }
+.csv-view-toggle { display: flex; width: fit-content; gap: 3px; padding: 3px; border: 1px solid #30363d; border-radius: 7px; background: #111417; }
+.csv-view-toggle button { padding: 5px 9px; border: 0; border-radius: 4px; color: #aab3bb; background: transparent; font: inherit; font-size: .72rem; }
+.csv-view-toggle button.is-active { color: #e8edf0; background: #2b333a; }
+.csv-table-frame { display: flex; width: 100%; max-height: min(62vh, 720px); min-height: 260px; flex-direction: column; overflow: hidden; border: 1px solid #30363d; border-radius: 7px; background: #0e1012; }
+.csv-table-viewport { min-height: 0; flex: 1; overflow: auto; background: #0e1012; }
+.csv-data-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; color: #dce3e8; font-family: SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: .76rem; }
+.csv-data-table th, .csv-data-table td { min-width: 112px; padding: 8px 11px; border-right: 1px solid #242b30; border-bottom: 1px solid #242b30; text-align: left; white-space: nowrap; }
+.csv-data-table th { position: sticky; z-index: 1; top: 0; color: #c9d8e4; background: #202a32; font-weight: 600; }
+.csv-data-table tbody tr:nth-child(even) td { background: #111619; }
+.csv-data-table .csv-omitted-rows td { position: static; padding: 10px 12px; color: #8996a0; background: #171c20; text-align: center; font-family: inherit; font-style: italic; }
+.csv-data-table .csv-row-number { position: sticky; z-index: 2; left: 0; min-width: 44px; width: 44px; color: #7f8b94; background: #171b1f; text-align: right; }
+.csv-data-table thead .csv-row-number { z-index: 3; background: #252b31; }
+.csv-preview-note { flex: 0 0 auto; padding: 9px 12px; border-top: 1px solid #30363d; color: #aeb7be; background: #171b1f; font-size: .7rem; }
 .file-editor-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
 .file-editor-actions > span { margin-right: auto; color: #89939c; font-size: .7rem; }
 .unsaved-changes-dialog { display: grid; gap: 11px; }
@@ -343,7 +361,24 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .file-editor-path,
 .app-shell[data-theme="light"] .file-editor-actions > span { color: #68737c; }
 .app-shell[data-theme="light"] .file-editor-help { color: #53616b; }
-.app-shell[data-theme="light"] .workspace-file-editor { border-color: #cbd2d8; color: #26323a; background: #fff; }
+.app-shell[data-theme="light"] .workspace-editor-shell { border-color: #cbd2d8; background: #fff; }
+.app-shell[data-theme="light"] .workspace-editor-gutter { border-color: #e2e6e9; color: #8a959e; background: #f3f5f6; }
+.app-shell[data-theme="light"] .workspace-file-editor { color: #26323a; background: #fff; }
+.app-shell[data-theme="light"] .workspace-editor-shell.is-data-editor .workspace-file-editor { background: repeating-linear-gradient(to bottom, #fff 0, #fff 1.209rem, #f6f8f9 1.209rem, #f6f8f9 2.418rem); background-attachment: local; }
+.app-shell[data-theme="light"] .editor-shortcut-hint { color: #87919a; }
+.app-shell[data-theme="light"] .csv-view-toggle { border-color: #cbd2d8; background: #eef1f3; }
+.app-shell[data-theme="light"] .csv-view-toggle button { color: #56616a; }
+.app-shell[data-theme="light"] .csv-view-toggle button.is-active { color: #202a31; background: #fff; box-shadow: 0 1px 3px rgb(28 39 48 / 14%); }
+.app-shell[data-theme="light"] .csv-table-frame { border-color: #cbd2d8; background: #fff; }
+.app-shell[data-theme="light"] .csv-table-viewport { background: #fff; }
+.app-shell[data-theme="light"] .csv-data-table { color: #27323a; }
+.app-shell[data-theme="light"] .csv-data-table th, .app-shell[data-theme="light"] .csv-data-table td { border-color: #e1e6e9; }
+.app-shell[data-theme="light"] .csv-data-table th { color: #34434e; background: #edf2f5; }
+.app-shell[data-theme="light"] .csv-data-table tbody tr:nth-child(even) td { background: #f8fafb; }
+.app-shell[data-theme="light"] .csv-data-table .csv-omitted-rows td { color: #68757e; background: #edf1f3; }
+.app-shell[data-theme="light"] .csv-data-table .csv-row-number { color: #75818a; background: #f1f3f5; }
+.app-shell[data-theme="light"] .csv-data-table thead .csv-row-number { background: #e9eef1; }
+.app-shell[data-theme="light"] .csv-preview-note { border-color: #d5dce1; color: #59656e; background: #f1f4f6; }
 .app-shell[data-theme="light"] .discard-changes-button { color: #963f3f; }
 .app-shell[data-theme="light"] .workspace-tile,
 .app-shell[data-theme="light"] .more-option { border-color: #d8dde2; color: #22282d; background: #fff; }
