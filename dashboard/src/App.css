@@ -21,8 +21,13 @@ button { cursor: pointer; }
 .root-data-item { margin-top: 3px; }
 .tree-node-row { position: relative; display: flex; align-items: center; }
 .tree-node-row > .tree-item { padding-right: 36px; }
-.item-settings { position: absolute; top: 3px; right: 4px; display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 4px; color: #89939c; background: #111316; font-size: .75rem; opacity: .68; }
+.item-settings { position: absolute; top: 3px; right: 4px; display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 4px; color: #89939c; background: #111316; font-size: .75rem; opacity: 0; transition: opacity 120ms ease; }
 .tree-node-row:hover .item-settings, .item-settings:focus-visible { color: #eff3f4; background: #343940; opacity: 1; }
+.destination-select-button { position: absolute; z-index: 2; top: 4px; right: 5px; padding: 4px 9px; border: 1px solid #47749a; border-radius: 4px; color: #c6e4fc; background: #20374a; font-size: .68rem; opacity: 0; transition: opacity 120ms ease; }
+.tree-node-row:hover .destination-select-button, .destination-select-button:focus-visible { opacity: 1; }
+.is-selecting-download-folder .item-settings { display: none; }
+.destination-selection-banner { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0 8px; padding: 7px 8px; border: 1px solid #37536a; border-radius: 5px; color: #b9d7ed; background: #17232c; font-size: .7rem; }
+.destination-selection-banner button { padding: 3px 6px; border: 1px solid #4b5b68; border-radius: 4px; color: #c5cbd0; background: #202429; font-size: .67rem; }
 .empty-data-folder { padding: 5px 6px; color: #737c84; font-size: .69rem; }
 .compile-tree-strategy { display: flex; min-height: 32px; align-items: center; gap: 7px; padding: 0 7px; color: #c5cbd0; font-size: .78rem; cursor: pointer; }
 .compile-tree-strategy:hover { border-radius: 4px; background: #202429; }
@@ -72,6 +77,22 @@ button { cursor: pointer; }
 .main-content.sidebar-is-collapsed { margin-left: 46px; }
 .main-content.is-sidebar-resizing { transition: none; }
 .home-view { max-width: 720px; }
+.wordmark-grail { display: inline-block; width: .56em; height: .92em; margin: 0 -.015em; vertical-align: -.16em; }
+.wordmark-grail img { display: block; width: 100%; height: 100%; object-fit: fill; }
+.file-editor-view { display: grid; width: min(100%, 1100px); gap: 12px; }
+.file-editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.file-editor-toolbar .back-link { display: inline-flex; align-items: center; gap: 7px; }
+.file-editor-status { color: #929ba4; font-size: .74rem; }
+.file-editor-path { margin: -7px 0 0; color: #89939c; font-size: .75rem; }
+.file-editor-path code { overflow-wrap: anywhere; }
+.file-editor-help { margin: 0; color: #aeb5bc; font-size: .78rem; line-height: 1.5; }
+.workspace-file-editor { width: 100%; min-height: min(62vh, 720px); resize: vertical; padding: 16px; border: 1px solid #30363d; border-radius: 7px; color: #dce3e8; background: #0e1012; font-family: SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: .78rem; line-height: 1.55; tab-size: 4; }
+.workspace-file-editor:focus { border-color: #4c88b8; outline: 2px solid rgb(76 136 184 / 22%); }
+.file-editor-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+.file-editor-actions > span { margin-right: auto; color: #89939c; font-size: .7rem; }
+.unsaved-changes-dialog { display: grid; gap: 11px; }
+.unsaved-changes-dialog h2, .unsaved-changes-dialog p { margin: 0; }
+.discard-changes-button { color: #e1a6a6; }
 h1 { margin: 10px 0 12px; color: #f5f5f1; font-size: clamp(2rem, 4vw, 3rem); font-weight: 560; letter-spacing: -.04em; }
 .page-description { max-width: 620px; margin: 0; color: #aeb5bc; font-size: 1rem; line-height: 1.65; }
 .workspace-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 340px)); gap: 14px; margin-top: 36px; }
@@ -130,6 +151,11 @@ code { color: #b8d8fa; }
 .secondary-button:hover { color: #fff; background: #24272b; }
 .dialog-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 48%); }
 .path-dialog { width: min(100%, 540px); padding: 26px; border: 1px solid #343940; border-radius: 10px; background: #16191d; box-shadow: 0 20px 60px rgb(0 0 0 / 48%); }
+.yahoo-overwrite-dialog { display: grid; gap: 12px; }
+.yahoo-overwrite-dialog h2, .yahoo-overwrite-dialog p { margin: 0; }
+.yahoo-overwrite-files { display: grid; gap: 6px; max-height: 180px; overflow: auto; margin: 0; padding: 9px 10px 9px 28px; border: 1px solid #493c32; border-radius: 6px; color: #e5c9aa; background: #1d1916; font-size: .76rem; }
+.yahoo-overwrite-files li { padding: 2px 0; }
+.yahoo-overwrite-files code { display: block; overflow-wrap: anywhere; color: #d7dce0; font-size: .7rem; }
 .builder-dialog { width: min(100%, 620px); }
 .builder-dialog-options { display: grid; gap: 10px; margin-top: 24px; }
 .builder-dialog-option { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px; border: 1px solid #30353b; border-radius: 8px; color: #e7edf2; background: #111316; text-align: left; }
@@ -150,6 +176,50 @@ code { color: #b8d8fa; }
 .compile-error { white-space: pre-wrap; max-height: 220px; overflow: auto; }
 .compile-actions { flex-wrap: wrap; }
 .simple-backtest-view { max-width: 960px; }
+.yahoo-download-view { max-width: 900px; }
+.yahoo-download-panel { display: grid; gap: 15px; margin-top: 20px; }
+.yahoo-download-form { display: grid; gap: 16px; }
+.symbol-field { position: relative; }
+.symbol-field > label { color: #c5cbd0; font-size: .76rem; }
+.symbol-results-panel { display: grid; gap: 7px; padding: 9px; border: 1px solid #333a40; border-radius: 6px; background: #111315; }
+.symbol-results-heading { color: #aab3bb; font-size: .7rem; font-weight: 650; }
+.symbol-results-empty { color: #879099; font-size: .72rem; }
+.selected-yahoo-instruments { display: grid; gap: 5px; padding: 8px; border: 1px solid #344d60; border-radius: 6px; background: #111920; }
+.selected-yahoo-instruments > span { color: #9ab5c8; font-size: .69rem; }
+.selected-yahoo-instrument { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: .73rem; }
+.selected-yahoo-instrument strong { color: #9bcafa; }
+.selected-yahoo-instrument span { flex: 1; overflow: hidden; color: #aab3bb; text-overflow: ellipsis; white-space: nowrap; }
+.selected-yahoo-instrument button, .add-manual-symbol { justify-self: start; padding: 4px 7px; border: 1px solid #424a52; border-radius: 4px; color: #aab3bb; background: #1a1e22; font-size: .68rem; }
+.add-manual-symbol { color: #9bcafa; }
+.symbol-suggestions { display: grid; max-height: 230px; overflow: auto; border: 1px solid #3b444d; border-radius: 5px; background: #171a1e; }
+.symbol-suggestions button { display: grid; grid-template-columns: 90px 1fr; gap: 3px 9px; padding: 9px 11px; border: 0; border-bottom: 1px solid #292d32; color: #e8edf1; background: transparent; text-align: left; }
+.symbol-suggestions button:hover, .symbol-suggestions button:focus-visible { background: #252a30; outline: none; }
+.symbol-suggestions button strong { grid-row: span 2; align-self: center; color: #9bcafa; font-size: .8rem; }
+.symbol-suggestions button span { overflow: hidden; font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
+.symbol-suggestions button small { color: #8b959e; font-size: .68rem; }
+.field-help, .symbol-search-status, .symbol-search-error { color: #8e98a1; font-size: .72rem; line-height: 1.45; }
+.symbol-search-error { color: #d49b9b; }
+.destination-field small { color: #89939c; font-size: .7rem; line-height: 1.45; }
+.destination-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.destination-selection-hint { color: #b9d7ed !important; }
+.filename-template-field small { color: #89939c; font-size: .7rem; line-height: 1.5; }
+.filename-template-field code { overflow-wrap: anywhere; color: #a9c7df; }
+.yahoo-output-preview { display: grid; gap: 5px; padding: 10px 11px; border: 1px solid #292d32; border-radius: 6px; background: #0d0f11; }
+.yahoo-output-preview span { color: #879099; font-size: .69rem; }
+.yahoo-output-preview code { overflow-wrap: anywhere; font-size: .74rem; }
+.interval-warning { margin: -5px 0 0; color: #ceb77b; }
+.yahoo-download-error { margin: 0; white-space: pre-wrap; }
+.yahoo-download-success { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid #29483a; border-radius: 6px; color: #a7d8bd; background: #111b16; font-size: .77rem; }
+.yahoo-download-success code { overflow-wrap: anywhere; color: #c4e8d2; }
+.yahoo-download-actions { display: flex; align-items: center; gap: 12px; }
+.yahoo-download-actions > span { color: #929ba4; font-size: .74rem; }
+.yahoo-download-actions button:disabled { cursor: wait; opacity: .58; }
+.yahoo-download-progress { display: grid; gap: 7px; padding: 10px 11px; border: 1px solid #34414a; border-radius: 6px; background: #11171b; }
+.yahoo-download-progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #c5d1da; font-size: .74rem; }
+.yahoo-download-progress-heading span { color: #9ca8b1; font-variant-numeric: tabular-nums; }
+.yahoo-download-progress progress { width: 100%; height: 7px; accent-color: #69aee8; }
+.yahoo-download-progress small { color: #89939c; font-size: .68rem; }
+.yahoo-provider-notice { margin: 0; color: #737d86; font-size: .68rem; line-height: 1.45; }
 .simple-backtest-title-row { display: flex; align-items: center; gap: 8px; }
 .simple-backtest-title-row h1 { margin-bottom: 8px; }
 .backtest-settings-button { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; margin-top: -2px; border: 1px solid #30353b; border-radius: 6px; color: #9ca5ad; background: #14171a; font-size: .9rem; }
@@ -225,7 +295,7 @@ code { color: #b8d8fa; }
 .bottom-bar { position: fixed; z-index: 20; right: 0; bottom: 0; left: 0; display: flex; height: 57px; align-items: center; justify-content: center; gap: 18px; border-top: 1px solid #24272b; background: #111316; }
 .bottom-bar button { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 6px; padding: 8px 11px; color: #879099; background: transparent; font-size: .78rem; }
 .bottom-bar button:hover, .bottom-bar button.is-active { color: #e7edf2; background: #24272b; }
-@media (max-width: 640px) { .main-content { padding: 48px 24px 88px; } .main-content.sidebar-is-open { margin-left: 0; } .path-dialog { padding: 20px; } .config-section, .backtest-results { padding: 12px; } .config-section-heading, .engine-notice { align-items: flex-start; flex-direction: column; } .compile-actions { justify-content: stretch; } .compile-actions button { flex: 1 1 auto; } .main-content.is-more-page { padding-bottom: 14px; } .more-view { min-height: calc(100vh - 119px); } }
+@media (max-width: 640px) { .main-content { padding: 48px 24px 88px; } .main-content.sidebar-is-open { margin-left: 0; } .path-dialog { padding: 20px; } .config-section, .backtest-results { padding: 12px; } .config-section-heading, .engine-notice { align-items: flex-start; flex-direction: column; } .compile-actions { justify-content: stretch; } .compile-actions button { flex: 1 1 auto; } .main-content.is-more-page { padding-bottom: 14px; } .more-view { min-height: calc(100vh - 119px); } .yahoo-download-actions { align-items: flex-start; flex-direction: column; } .yahoo-download-actions > button { width: 100%; } .file-editor-actions { flex-wrap: wrap; } .file-editor-actions > span { flex: 1 1 100%; } }
 
 body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] { color: #22272c; background: #f5f6f8; }
@@ -248,6 +318,9 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .item-settings { color: #6c7780; background: #fff; }
 .app-shell[data-theme="light"] .tree-node-row:hover .item-settings,
 .app-shell[data-theme="light"] .item-settings:focus-visible { color: #20262b; background: #e4e8ec; }
+.app-shell[data-theme="light"] .destination-select-button { border-color: #9abbd3; color: #225d87; background: #e7f3fb; }
+.app-shell[data-theme="light"] .destination-selection-banner { border-color: #bdd5e5; color: #315d79; background: #edf6fb; }
+.app-shell[data-theme="light"] .destination-selection-banner button { border-color: #cbd2d8; color: #42505a; background: #fff; }
 .app-shell[data-theme="light"] .tree-children { border-color: #d7dce1; }
 .app-shell[data-theme="light"] .compile-tree-footer { border-color: #d6dbe0; background: #fff; }
 .app-shell[data-theme="light"] .compile-success-toast { border-color: #a8d6b9; color: #245e3b; background: #eef9f1; }
@@ -266,6 +339,12 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] h1,
 .app-shell[data-theme="light"] .settings-preference-copy strong { color: #181d21; }
 .app-shell[data-theme="light"] .page-description { color: #59636c; }
+.app-shell[data-theme="light"] .file-editor-status,
+.app-shell[data-theme="light"] .file-editor-path,
+.app-shell[data-theme="light"] .file-editor-actions > span { color: #68737c; }
+.app-shell[data-theme="light"] .file-editor-help { color: #53616b; }
+.app-shell[data-theme="light"] .workspace-file-editor { border-color: #cbd2d8; color: #26323a; background: #fff; }
+.app-shell[data-theme="light"] .discard-changes-button { color: #963f3f; }
 .app-shell[data-theme="light"] .workspace-tile,
 .app-shell[data-theme="light"] .more-option { border-color: #d8dde2; color: #22282d; background: #fff; }
 .app-shell[data-theme="light"] .workspace-tile:hover,
@@ -318,6 +397,43 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .assembly-add-button { border-color: #cbd2d8; color: #3a566b; background: #fff; }
 .app-shell[data-theme="light"] .strategy-config-details { border-color: #e0e4e8; }
 .app-shell[data-theme="light"] .result-metrics > div { border-color: #d8dde2; background: #f8f9fa; }
+.app-shell[data-theme="light"] .symbol-field > label { color: #424b53; }
+.app-shell[data-theme="light"] .symbol-results-panel { border-color: #d8dde2; background: #f8f9fa; }
+.app-shell[data-theme="light"] .symbol-results-heading { color: #48545d; }
+.app-shell[data-theme="light"] .symbol-results-empty { color: #68737c; }
+.app-shell[data-theme="light"] .selected-yahoo-instruments { border-color: #c4d8e7; background: #f0f7fb; }
+.app-shell[data-theme="light"] .selected-yahoo-instruments > span,
+.app-shell[data-theme="light"] .selected-yahoo-instrument strong,
+.app-shell[data-theme="light"] .add-manual-symbol { color: #286a9f; }
+.app-shell[data-theme="light"] .selected-yahoo-instrument span { color: #53616b; }
+.app-shell[data-theme="light"] .selected-yahoo-instrument button,
+.app-shell[data-theme="light"] .add-manual-symbol { border-color: #cbd2d8; background: #fff; }
+.app-shell[data-theme="light"] .symbol-suggestions { border-color: #cbd2d8; background: #fff; }
+.app-shell[data-theme="light"] .symbol-suggestions button { border-color: #e1e5e8; color: #283139; }
+.app-shell[data-theme="light"] .symbol-suggestions button:hover,
+.app-shell[data-theme="light"] .symbol-suggestions button:focus-visible { background: #f0f3f5; }
+.app-shell[data-theme="light"] .symbol-suggestions button strong { color: #286a9f; }
+.app-shell[data-theme="light"] .symbol-suggestions button small,
+.app-shell[data-theme="light"] .field-help,
+.app-shell[data-theme="light"] .symbol-search-status,
+.app-shell[data-theme="light"] .destination-field small { color: #68737c; }
+.app-shell[data-theme="light"] .destination-selection-hint { color: #315d79 !important; }
+.app-shell[data-theme="light"] .filename-template-field small { color: #68737c; }
+.app-shell[data-theme="light"] .filename-template-field code { color: #286a9f; }
+.app-shell[data-theme="light"] .symbol-search-error { color: #a34444; }
+.app-shell[data-theme="light"] .yahoo-output-preview { border-color: #d8dde2; background: #f8f9fa; }
+.app-shell[data-theme="light"] .yahoo-output-preview span { color: #68737c; }
+.app-shell[data-theme="light"] .interval-warning { color: #796424; }
+.app-shell[data-theme="light"] .yahoo-download-success { border-color: #a8d6b9; color: #245e3b; background: #eef9f1; }
+.app-shell[data-theme="light"] .yahoo-download-success code { color: #245e3b; }
+.app-shell[data-theme="light"] .yahoo-download-actions > span { color: #68737c; }
+.app-shell[data-theme="light"] .yahoo-download-progress { border-color: #d2dce3; background: #f5f8fa; }
+.app-shell[data-theme="light"] .yahoo-download-progress-heading { color: #35434d; }
+.app-shell[data-theme="light"] .yahoo-download-progress-heading span,
+.app-shell[data-theme="light"] .yahoo-download-progress small { color: #68737c; }
+.app-shell[data-theme="light"] .yahoo-overwrite-files { border-color: #e2d1bd; color: #715439; background: #fbf7f2; }
+.app-shell[data-theme="light"] .yahoo-overwrite-files code { color: #39444c; }
+.app-shell[data-theme="light"] .yahoo-provider-notice { color: #68737c; }
 .app-shell[data-theme="light"] .result-metrics span,
 .app-shell[data-theme="light"] .orders-table th { color: #68737c; }
 .app-shell[data-theme="light"] .result-metrics strong,

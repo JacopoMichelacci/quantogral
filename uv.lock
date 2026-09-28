@@ -936,10 +936,12 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "polars" },
+    { name = "pyarrow" },
     { name = "pybind11" },
     { name = "quantolib" },
     { name = "tqdm" },
     { name = "wrds" },
+    { name = "yfinance" },
 ]
 
 [package.dev-dependencies]
@@ -957,10 +959,12 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "pandas", specifier = ">=3.0.1" },
     { name = "polars", specifier = ">=1.39.3" },
+    { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "pybind11", specifier = ">=3.0.2" },
     { name = "quantolib", specifier = ">=0.0.11" },
     { name = "tqdm", specifier = ">=4.67.3" },
     { name = "wrds", specifier = ">=3.1.6" },
+    { name = "yfinance", specifier = ">=1.2.0" },
 ]
 
 [package.metadata.requires-dev]

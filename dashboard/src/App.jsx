@@ -42,6 +42,25 @@ function loadBacktestSettings() {
   }
 }
 
+function localDateString(date) {
+  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+  return offsetDate.toISOString().slice(0, 10)
+}
+
+function defaultStartDate() {
+  const date = new Date()
+  date.setFullYear(date.getFullYear() - 1)
+  return localDateString(date)
+}
+
+async function readApiJson(response, feature) {
+  const contentType = response.headers.get('content-type') || ''
+  if (!contentType.includes('application/json')) {
+    throw new Error(`The local Quantogral API did not return JSON for ${feature}. Make sure ./start.sh is running both the website and its local API; if it is, stop other Quantogral servers and restart it.`)
+  }
+  return response.json()
+}
+
 function findStrategyFolderKeys(nodes, strategies, parentKey = 'Builder') {
   const folderKeys = []
   for (const node of nodes) {
@@ -74,7 +93,7 @@ function ScriptIcon() {
   )
 }
 
-function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelectStrategy, onSelectData, onOpenItemSettings, selectingStrategies = false, compileSelection = {}, onToggleCompileSelection }) {
+function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelectStrategy, onSelectData, onOpenItemSettings, selectingStrategies = false, compileSelection = {}, onToggleCompileSelection, selectingDownloadFolder = false, onSelectDownloadFolder, isCodeWorkspace = false, onOpenWorkspaceFile }) {
   const isExpanded = Boolean(expandedNodes[nodeKey])
   const scope = nodeKey.startsWith('data/') ? 'data' : 'builder'
   const relativePath = nodeKey.replace(scope === 'data' ? /^data\/?/ : /^Builder\/?/, '')
@@ -83,6 +102,8 @@ function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelect
     const isStrategy = node.type === 'script' && node.name.toLowerCase().endsWith('.hpp') && nodeKey.includes('/strategies/')
     const strategy = isStrategy ? strategies.find((item) => item.file === node.name) : null
     const isDataFile = node.type === 'file' && nodeKey.startsWith('data/') && ['.csv', '.parquet', '.pq'].includes(node.name.split('.').pop()?.toLowerCase().replace(/^/, '.'))
+    const suffix = `.${node.name.split('.').pop()?.toLowerCase()}`
+    const isEditableFile = isDataFile || ['.hpp', '.h', '.cpp', '.cc', '.cxx', '.c', '.py', '.txt', '.md', '.json', '.yaml', '.yml', '.toml', '.ini', '.sh'].includes(suffix)
     const dataPath = isDataFile ? `./${nodeKey}` : ''
     if (selectingStrategies && strategy) {
       return (
@@ -99,14 +120,14 @@ function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelect
         <button
           className={`tree-item script-item ${strategy ? 'draggable-strategy' : ''} ${isDataFile ? 'draggable-data' : ''}`}
           draggable={Boolean(strategy || isDataFile)}
-          onClick={() => strategy ? onSelectStrategy(strategy) : isDataFile && onSelectData(dataPath, node.name)}
+          onClick={() => isCodeWorkspace && isEditableFile ? onOpenWorkspaceFile({ scope, path: relativePath, name: node.name }) : strategy ? onSelectStrategy(strategy) : isDataFile && onSelectData(dataPath, node.name)}
           onDragStart={(event) => {
             if (strategy) event.dataTransfer.setData('application/x-quantogral-strategy', strategy.id)
             else if (isDataFile) event.dataTransfer.setData('application/x-quantogral-data-file', dataPath)
             else return
             event.dataTransfer.effectAllowed = 'copy'
           }}
-          title={strategy ? `Drag or click to add ${strategy.name}` : isDataFile ? `Drag or click to add ${dataPath}` : node.name}
+          title={isCodeWorkspace && isEditableFile ? `Open ${node.name}` : strategy ? `Drag or click to add ${strategy.name}` : isDataFile ? `Drag or click to add ${dataPath}` : node.name}
           type="button"
         >
           <span className="tree-indent" />
@@ -126,12 +147,13 @@ function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelect
           <FolderIcon />
           <span>{node.name}</span>
         </button>
+        {selectingDownloadFolder && scope === 'data' && <button className="destination-select-button" onClick={() => onSelectDownloadFolder(relativePath ? `./data/${relativePath}` : './data')} type="button">Select</button>}
         {!selectingStrategies && <button aria-label={`Settings for ${node.name}`} className="item-settings" onClick={() => onOpenItemSettings({ scope, path: relativePath, name: node.name, type: 'directory' })} title={`Settings for ${node.name}`} type="button">⚙</button>}
       </div>
       {isExpanded && node.children?.length > 0 && (
         <div className="tree-children">
           {node.children.map((child) => (
-            <TreeNode key={`${nodeKey}/${child.name}`} node={child} nodeKey={`${nodeKey}/${child.name}`} expandedNodes={expandedNodes} onToggle={onToggle} strategies={strategies} onSelectStrategy={onSelectStrategy} onSelectData={onSelectData} onOpenItemSettings={onOpenItemSettings} selectingStrategies={selectingStrategies} compileSelection={compileSelection} onToggleCompileSelection={onToggleCompileSelection} />
+            <TreeNode key={`${nodeKey}/${child.name}`} node={child} nodeKey={`${nodeKey}/${child.name}`} expandedNodes={expandedNodes} onToggle={onToggle} strategies={strategies} onSelectStrategy={onSelectStrategy} onSelectData={onSelectData} onOpenItemSettings={onOpenItemSettings} selectingStrategies={selectingStrategies} compileSelection={compileSelection} onToggleCompileSelection={onToggleCompileSelection} selectingDownloadFolder={selectingDownloadFolder} onSelectDownloadFolder={onSelectDownloadFolder} isCodeWorkspace={isCodeWorkspace} onOpenWorkspaceFile={onOpenWorkspaceFile} />
           ))}
         </div>
       )}
@@ -189,6 +211,12 @@ function App() {
   const [itemNameDraft, setItemNameDraft] = useState('')
   const [itemDialogError, setItemDialogError] = useState('')
   const [saveError, setSaveError] = useState('')
+  const [fileEditor, setFileEditor] = useState(null)
+  const [editorSaving, setEditorSaving] = useState(false)
+  const [editorError, setEditorError] = useState('')
+  const [unsavedPromptOpen, setUnsavedPromptOpen] = useState(false)
+  const [unsavedPromptError, setUnsavedPromptError] = useState('')
+  const [pendingEditorAction, setPendingEditorAction] = useState(null)
   const [strategyCatalog, setStrategyCatalog] = useState([])
   const [backtestStrategies, setBacktestStrategies] = useState([])
   const [expandedBacktestStrategies, setExpandedBacktestStrategies] = useState({})
@@ -207,6 +235,7 @@ function App() {
   const dataDragEnterCount = useRef(0)
   const strategyInstanceCount = useRef(0)
   const dataInstanceCount = useRef(0)
+  const fileOpenRequest = useRef(0)
   const resizePointerId = useRef(null)
   const compileNoticeFadeTimer = useRef(null)
   const compileNoticeClearTimer = useRef(null)
@@ -217,6 +246,23 @@ function App() {
   const [backtestSettingsOpen, setBacktestSettingsOpen] = useState(false)
   const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0 })
   const [backtestConfig, setBacktestConfig] = useState(loadBacktestSettings)
+  const [yahooTicker, setYahooTicker] = useState('')
+  const [selectedYahooInstruments, setSelectedYahooInstruments] = useState([])
+  const [yahooSymbolResults, setYahooSymbolResults] = useState([])
+  const [isSearchingYahoo, setIsSearchingYahoo] = useState(false)
+  const [yahooSearchError, setYahooSearchError] = useState('')
+  const [yahooInterval, setYahooInterval] = useState('1d')
+  const [yahooFormat, setYahooFormat] = useState('csv')
+  const [yahooFilenameTemplate, setYahooFilenameTemplate] = useState('{name}_{ts}_{startdate}_{enddate}_{tz}_{provider}.{extension}')
+  const [yahooStartDate, setYahooStartDate] = useState(defaultStartDate)
+  const [yahooEndDate, setYahooEndDate] = useState(() => localDateString(new Date()))
+  const [downloadDestination, setDownloadDestination] = useState('./data')
+  const [selectingDownloadFolder, setSelectingDownloadFolder] = useState(false)
+  const [isYahooDownloading, setIsYahooDownloading] = useState(false)
+  const [yahooDownloadProgress, setYahooDownloadProgress] = useState(null)
+  const [yahooDownloadError, setYahooDownloadError] = useState('')
+  const [yahooDownloadResult, setYahooDownloadResult] = useState(null)
+  const [yahooOverwritePrompt, setYahooOverwritePrompt] = useState(null)
 
   useEffect(() => {
     try { window.localStorage.setItem(BACKTEST_SETTINGS_KEY, JSON.stringify(backtestConfig)) } catch { /* Keep the current settings for this session if storage is unavailable. */ }
@@ -237,6 +283,39 @@ function App() {
     window.clearTimeout(compileNoticeFadeTimer.current)
     window.clearTimeout(compileNoticeClearTimer.current)
   }, [])
+
+  useEffect(() => {
+    if (!fileEditor || fileEditor.content === fileEditor.savedContent) return undefined
+    const warnBeforeUnload = (event) => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', warnBeforeUnload)
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload)
+  }, [fileEditor])
+
+  useEffect(() => {
+    const query = yahooTicker.trim()
+    if (activePage !== 'data-download-yahoo-finance' || query.length < 2) {
+      setYahooSymbolResults([])
+      setIsSearchingYahoo(false)
+      setYahooSearchError('')
+      return undefined
+    }
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      setIsSearchingYahoo(true)
+      setYahooSearchError('')
+      try {
+        const response = await fetch(`/api/data/yahoo/search?q=${encodeURIComponent(query)}`, { signal: controller.signal })
+        const result = await readApiJson(response, 'Yahoo Finance instrument search')
+        if (!response.ok) throw new Error(result.error || 'Symbol search failed.')
+        setYahooSymbolResults(result.results || [])
+      } catch (error) {
+        if (error.name !== 'AbortError') setYahooSearchError(error.message)
+      } finally {
+        if (!controller.signal.aborted) setIsSearchingYahoo(false)
+      }
+    }, 350)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [activePage, yahooTicker])
 
   function applyStrategy(strategy) {
     strategyInstanceCount.current += 1
@@ -395,6 +474,115 @@ function App() {
     setItemDialogError('')
   }
 
+  function beginSelectDownloadFolder() {
+    setSelectingDownloadFolder(true)
+    setSidebarExpanded(true)
+    setExpandedNodes((nodes) => ({ ...nodes, data: true }))
+  }
+
+  function selectDownloadFolder(path) {
+    setDownloadDestination(path)
+    setSelectingDownloadFolder(false)
+    setYahooDownloadError('')
+    setYahooDownloadResult(null)
+  }
+
+  async function openWorkspaceFile(file) {
+    const requestId = ++fileOpenRequest.current
+    setEditorError('')
+    setFileEditor({ ...file, format: '', content: '', savedContent: '', loading: true })
+    try {
+      const query = new URLSearchParams({ scope: file.scope, path: file.path })
+      const response = await fetch(`/api/workspace/file?${query}`)
+      const result = await readApiJson(response, 'workspace file')
+      if (!response.ok) throw new Error(result.error || 'Could not open this file.')
+      if (requestId !== fileOpenRequest.current) return
+      setFileEditor({ ...file, format: result.format, content: result.content, savedContent: result.content, loading: false, rows: result.rows, columns: result.columns })
+    } catch (error) {
+      if (requestId !== fileOpenRequest.current) return
+      setFileEditor({ ...file, format: '', content: '', savedContent: '', loading: false, error: error.message })
+    }
+  }
+
+  async function persistWorkspaceFile(editor) {
+    const response = await fetch('/api/workspace/file', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: editor.scope, path: editor.path, content: editor.content }),
+    })
+    const result = await readApiJson(response, 'workspace file save')
+    if (!response.ok) throw new Error(result.error || 'Could not save this file.')
+    return result
+  }
+
+  async function saveCurrentWorkspaceFile() {
+    if (!fileEditor || fileEditor.loading) return false
+    const contentToSave = fileEditor.content
+    setEditorSaving(true)
+    setEditorError('')
+    try {
+      await persistWorkspaceFile(fileEditor)
+      setFileEditor((current) => current ? { ...current, savedContent: contentToSave } : current)
+      return true
+    } catch (error) {
+      setEditorError(error.message)
+      return false
+    } finally {
+      setEditorSaving(false)
+    }
+  }
+
+  function applyEditorAction(action) {
+    if (!action) return
+    if (action.type !== 'open') fileOpenRequest.current += 1
+    setPendingEditorAction(null)
+    setUnsavedPromptOpen(false)
+    setUnsavedPromptError('')
+    if (action.type === 'open') openWorkspaceFile(action.file)
+    else if (action.type === 'page') { setFileEditor(null); setActivePage(action.page) }
+    else if (action.type === 'close') setFileEditor(null)
+  }
+
+  function requestEditorAction(action) {
+    if (fileEditor?.content !== fileEditor?.savedContent) {
+      setPendingEditorAction(action)
+      setUnsavedPromptError('')
+      setUnsavedPromptOpen(true)
+      return
+    }
+    applyEditorAction(action)
+  }
+
+  function requestOpenWorkspaceFile(file) {
+    if (fileEditor?.scope === file.scope && fileEditor?.path === file.path) return
+    requestEditorAction({ type: 'open', file })
+  }
+
+  function navigateToPage(page) {
+    requestEditorAction({ type: 'page', page })
+  }
+
+  async function resolveUnsavedPrompt(choice) {
+    if (choice === 'cancel') {
+      setUnsavedPromptOpen(false)
+      setPendingEditorAction(null)
+      return
+    }
+    if (choice === 'save') {
+      setEditorSaving(true)
+      setUnsavedPromptError('')
+      try {
+        await persistWorkspaceFile(fileEditor)
+      } catch (error) {
+        setUnsavedPromptError(`Could not save changes: ${error.message}`)
+        setEditorSaving(false)
+        return
+      }
+      setEditorSaving(false)
+    }
+    applyEditorAction(pendingEditorAction)
+  }
+
   async function submitWorkspaceItem(event) {
     event.preventDefault()
     if (!itemDialog) return
@@ -425,6 +613,80 @@ function App() {
     } catch (error) {
       setItemDialogError(error.message)
     }
+  }
+
+  async function watchYahooDownloadJob(jobId) {
+    let job
+    do {
+      await new Promise((resolve) => window.setTimeout(resolve, 500))
+      const statusResponse = await fetch(`/api/data/yahoo/download/${encodeURIComponent(jobId)}`)
+      job = await readApiJson(statusResponse, 'Yahoo Finance download status')
+      if (!statusResponse.ok) throw new Error(job.error || 'Could not read download status.')
+      setYahooDownloadProgress(job)
+    } while (!job.finished)
+    setYahooDownloadResult(job)
+    setYahooOverwritePrompt(job.needsConfirmation ? job : null)
+    fetch('/api/builder/tree').then((treeResponse) => treeResponse.ok ? treeResponse.json() : null).then((tree) => {
+      if (tree) { setBuilderTree(tree.children); setDataTree(tree.dataChildren || []) }
+    }).catch(() => {})
+    return job
+  }
+
+  async function submitYahooDownload(event) {
+    event.preventDefault()
+    setYahooDownloadError('')
+    setYahooDownloadResult(null)
+    const missing = []
+    if (selectedYahooInstruments.length === 0) missing.push('select at least one instrument')
+    if (!yahooStartDate) missing.push('choose a start date')
+    if (!yahooEndDate) missing.push('choose an end date')
+    if (yahooStartDate && yahooEndDate && yahooStartDate > yahooEndDate) missing.push('make sure the start date is on or before the end date')
+    if (!downloadDestination.trim()) missing.push('choose or enter a destination folder')
+    if (!yahooFilenameTemplate.trim()) missing.push('enter a filename pattern')
+    if (missing.length) {
+      setYahooDownloadError(`Can't download yet: ${missing.join('; ')}.`)
+      return
+    }
+    setYahooOverwritePrompt(null)
+    setIsYahooDownloading(true)
+    setYahooDownloadProgress({ status: 'Starting download…', completed: 0, total: selectedYahooInstruments.length, currentTicker: null, results: [], errors: [] })
+    try {
+      const response = await fetch('/api/data/yahoo/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tickers: selectedYahooInstruments.map((instrument) => instrument.symbol), interval: yahooInterval, startDate: yahooStartDate, endDate: yahooEndDate, format: yahooFormat, destination: downloadDestination, filenameTemplate: yahooFilenameTemplate }),
+      })
+      const launch = await readApiJson(response, 'Yahoo Finance download')
+      if (!response.ok) throw new Error(launch.error || 'Yahoo Finance download failed.')
+      await watchYahooDownloadJob(launch.jobId)
+    } catch (error) {
+      setYahooDownloadError(error.message)
+      setYahooDownloadProgress((progress) => progress ? { ...progress, status: 'Download status unavailable' } : null)
+    } finally {
+      setIsYahooDownloading(false)
+    }
+  }
+
+  async function overwriteYahooDataFiles() {
+    if (!yahooOverwritePrompt) return
+    setIsYahooDownloading(true)
+    setYahooDownloadError('')
+    try {
+      const response = await fetch(`/api/data/yahoo/download/${encodeURIComponent(yahooOverwritePrompt.jobId)}/overwrite`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      const result = await readApiJson(response, 'Yahoo Finance overwrite confirmation')
+      if (!response.ok) throw new Error(result.error || 'Could not overwrite existing data files.')
+      setYahooOverwritePrompt(null)
+      await watchYahooDownloadJob(result.jobId)
+    } catch (error) {
+      setYahooDownloadError(error.message)
+    } finally {
+      setIsYahooDownloading(false)
+    }
+  }
+
+  function backFromYahooOverwrite() {
+    setYahooOverwritePrompt(null)
+    setYahooDownloadProgress((progress) => progress ? { ...progress, status: 'Stopped; existing files were left unchanged.' } : null)
   }
 
   async function openCompilationView() {
@@ -565,11 +827,20 @@ function App() {
   const isBacktestingSection = isBacktesting || isGridSearch || isSimpleBacktesting
   const hasProjectSidebar = isBuilder || isGridSearch || isSimpleBacktesting || isDataDownload || isYahooFinance
   const selectedStrategies = strategyCatalog.filter((strategy) => compileSelection[strategy.id])
+  const yahooToday = localDateString(new Date())
+  const yahooFilenamePreview = yahooFilenameTemplate
+    .replaceAll('{name}', selectedYahooInstruments[0]?.symbol || 'AAPL')
+    .replaceAll('{symbol}', selectedYahooInstruments[0]?.symbol || 'AAPL')
+    .replaceAll('{ts}', yahooInterval).replaceAll('{interval}', yahooInterval)
+    .replaceAll('{startdate}', yahooStartDate).replaceAll('{start}', yahooStartDate)
+    .replaceAll('{enddate}', yahooEndDate).replaceAll('{end}', yahooEndDate)
+    .replaceAll('{provider}', 'yfinance').replaceAll('{tz}', 'exchange_timezone').replaceAll('{timezone}', 'exchange_timezone')
+    .replaceAll('{extension}', yahooFormat)
 
   return (
     <div className="app-shell" data-theme={siteTheme} style={{ '--sidebar-expanded-width': `${sidebarWidth}px` }}>
       {hasProjectSidebar && (
-        <aside className={`project-sidebar ${sidebarExpanded ? 'is-expanded' : 'is-collapsed'} ${isSidebarResizing ? 'is-resizing' : ''} ${selectingStrategies ? 'is-selecting-strategies' : ''}`}>
+        <aside className={`project-sidebar ${sidebarExpanded ? 'is-expanded' : 'is-collapsed'} ${isSidebarResizing ? 'is-resizing' : ''} ${selectingStrategies ? 'is-selecting-strategies' : ''} ${selectingDownloadFolder ? 'is-selecting-download-folder' : ''}`}>
           <div className="sidebar-header">
             {sidebarExpanded && <span className="sidebar-title">{selectingStrategies ? 'SELECT STRATEGIES' : 'PROJECT'}</span>}
             <button aria-label={sidebarExpanded ? 'Collapse project explorer' : 'Expand project explorer'} className="sidebar-toggle" onClick={() => setSidebarExpanded((expanded) => !expanded)} type="button">
@@ -582,6 +853,7 @@ function App() {
               <div className="project-tree-toolbar">
                 <button className="collapse-all-button" onClick={collapseExplorerToDefault} type="button">Collapse all</button>
               </div>
+              {selectingDownloadFolder && <div className="destination-selection-banner"><span>Choose a destination folder</span><button onClick={() => setSelectingDownloadFolder(false)} type="button">Cancel</button></div>}
               <div className="builder-row">
                 <button aria-expanded={builderExpanded} className="tree-item builder-item" onClick={toggleBuilder} type="button">
                   <span className="tree-chevron">{builderExpanded ? '⌄' : '›'}</span>
@@ -593,7 +865,7 @@ function App() {
               {builderExpanded && (
                 <div className="tree-children">
                   {builderTree.map((node) => (
-                    <TreeNode key={`Builder/${node.name}`} node={node} nodeKey={`Builder/${node.name}`} expandedNodes={expandedNodes} onToggle={toggleTreeNode} strategies={strategyCatalog} onSelectStrategy={applyStrategy} onOpenItemSettings={openItemSettings} selectingStrategies={selectingStrategies} compileSelection={compileSelection} onToggleCompileSelection={toggleCompileSelection} />
+                    <TreeNode key={`Builder/${node.name}`} node={node} nodeKey={`Builder/${node.name}`} expandedNodes={expandedNodes} onToggle={toggleTreeNode} strategies={strategyCatalog} onSelectStrategy={applyStrategy} onOpenItemSettings={openItemSettings} selectingStrategies={selectingStrategies} compileSelection={compileSelection} onToggleCompileSelection={toggleCompileSelection} isCodeWorkspace={isBuilder} onOpenWorkspaceFile={requestOpenWorkspaceFile} />
                   ))}
                 </div>
               )}
@@ -602,14 +874,15 @@ function App() {
                   <button aria-expanded={Boolean(expandedNodes.data)} className="tree-item directory-item root-data-item" onClick={() => toggleTreeNode('data')} type="button">
                     <span className="tree-chevron">{expandedNodes.data ? '⌄' : '›'}</span>
                     <FolderIcon />
-                    <span>data</span>
+                  <span>data</span>
                   </button>
+                  {selectingDownloadFolder && <button className="destination-select-button" onClick={() => selectDownloadFolder('./data')} type="button">Select</button>}
                   <button aria-label="Settings for data" className="item-settings" onClick={() => openItemSettings({ scope: 'data', path: '', name: 'data', type: 'directory', isRoot: true })} title="Settings for data" type="button">⚙</button>
                 </div>
                 {expandedNodes.data && (
                   <div className="tree-children">
                     {dataTree.length ? dataTree.map((node) => (
-                      <TreeNode key={`data/${node.name}`} node={node} nodeKey={`data/${node.name}`} expandedNodes={expandedNodes} onToggle={toggleTreeNode} strategies={strategyCatalog} onSelectStrategy={applyStrategy} onSelectData={addDataFile} onOpenItemSettings={openItemSettings} />
+                      <TreeNode key={`data/${node.name}`} node={node} nodeKey={`data/${node.name}`} expandedNodes={expandedNodes} onToggle={toggleTreeNode} strategies={strategyCatalog} onSelectStrategy={applyStrategy} onSelectData={addDataFile} onOpenItemSettings={openItemSettings} selectingDownloadFolder={selectingDownloadFolder} onSelectDownloadFolder={selectDownloadFolder} isCodeWorkspace={isBuilder} onOpenWorkspaceFile={requestOpenWorkspaceFile} />
                     )) : <div className="empty-data-folder">Empty folder</div>}
                   </div>
                 )}
@@ -670,20 +943,20 @@ function App() {
         ) : isHome ? (
           <section className="home-view">
             <div className="eyebrow">LOCAL WORKSPACE</div>
-            <h1>Welcome to Quantogral</h1>
+            <h1 className="home-welcome-title">Welcome to Quan<span aria-hidden="true" className="wordmark-grail"><img alt="" src="/favicon.png" /></span>ogral</h1>
             <p className="page-description">Your local quantitative research workspace.</p>
             <div className="workspace-tiles">
-              <button className="workspace-tile" onClick={() => setActivePage('backtesting')} type="button">
+              <button className="workspace-tile" onClick={() => navigateToPage('backtesting')} type="button">
                 <span className="tile-icon" aria-hidden="true">⌁</span>
                 <span className="tile-copy"><strong>Backtesting</strong><span>Backtesting workspace</span></span>
                 <span className="tile-arrow" aria-hidden="true">→</span>
               </button>
-              <button className="workspace-tile" onClick={() => { setBuilderExpanded(true); setActivePage('builder') }} type="button">
+              <button className="workspace-tile" onClick={() => { setBuilderExpanded(true); navigateToPage('builder') }} type="button">
                 <span className="tile-icon" aria-hidden="true">▱</span>
                 <span className="tile-copy"><strong>Code Workspace</strong><span>Strategy and indicator tools · In progress</span></span>
                 <span className="tile-arrow" aria-hidden="true">→</span>
               </button>
-              <button className="workspace-tile" onClick={() => setActivePage('data-download')} type="button">
+              <button className="workspace-tile" onClick={() => navigateToPage('data-download')} type="button">
                 <span className="tile-icon" aria-hidden="true">⇩</span>
                 <span className="tile-copy"><strong>Data Download</strong><span>Download market data into your local workspace</span></span>
                 <span className="tile-arrow" aria-hidden="true">→</span>
@@ -692,12 +965,12 @@ function App() {
           </section>
         ) : isDataDownload ? (
           <section className="home-view">
-            <button aria-label="Back to Home" className="back-link" onClick={() => setActivePage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
+            <button aria-label="Back to Home" className="back-link" onClick={() => navigateToPage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">DATA</div>
             <h1>Data Download</h1>
             <p className="page-description">Choose a provider for market data. Downloaded files will be kept in the local <code>data/</code> folder.</p>
             <div className="provider-tiles">
-              <button className="workspace-tile provider-tile" onClick={() => setActivePage('data-download-yahoo-finance')} type="button">
+              <button className="workspace-tile provider-tile" onClick={() => navigateToPage('data-download-yahoo-finance')} type="button">
                 <span className="tile-icon provider-icon" aria-hidden="true">YF</span>
                 <strong>Yahoo Finance</strong>
                 <span>Market data · In progress</span>
@@ -706,26 +979,67 @@ function App() {
             </div>
           </section>
         ) : isYahooFinance ? (
-          <section className="home-view placeholder-view">
-            <button aria-label="Back to Data Download" className="back-link" onClick={() => setActivePage('data-download')} title="Back to Data Download" type="button"><span aria-hidden="true">←</span></button>
+          <section className="yahoo-download-view">
+            <button aria-label="Back to Data Download" className="back-link" onClick={() => navigateToPage('data-download')} title="Back to Data Download" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">DATA · PROVIDER</div>
             <h1>Yahoo Finance</h1>
-            <p className="page-description">Yahoo Finance data downloading is not connected yet.</p>
-            <span className="progress-badge">IN PROGRESS</span>
+            <p className="page-description">Download historical data for one or more Yahoo Finance instruments, one file per symbol.</p>
+
+            <section className="config-section yahoo-download-panel">
+              <div className="config-section-heading"><h2>Download settings</h2><span>OHLCV · one symbol per file</span></div>
+              <form className="yahoo-download-form" onSubmit={submitYahooDownload}>
+                {yahooDownloadError && <p className="form-error yahoo-download-error" role="alert">{yahooDownloadError}</p>}
+                <div className="symbol-field config-field">
+                  <label htmlFor="yahoo-symbol">Instrument</label>
+                  <input autoComplete="off" id="yahoo-symbol" onChange={(event) => { setYahooTicker(event.target.value); setYahooDownloadError(''); setYahooDownloadResult(null) }} placeholder="Search by company, instrument, or ticker (e.g. Apple or AAPL)" type="text" value={yahooTicker} />
+                  <span className="field-help">Search Yahoo Finance’s listings, then choose an exact symbol below. Supports stocks, ETFs, indices, currencies, and crypto.</span>
+                  {selectedYahooInstruments.length > 0 && <div className="selected-yahoo-instruments"><span>Selected instruments · {selectedYahooInstruments.length}</span>{selectedYahooInstruments.map((instrument) => <div className="selected-yahoo-instrument" key={instrument.symbol}><strong>{instrument.symbol}</strong><span>{instrument.name}</span><button aria-label={`Remove ${instrument.symbol}`} onClick={() => setSelectedYahooInstruments((items) => items.filter((item) => item.symbol !== instrument.symbol))} type="button">Remove</button></div>)}</div>}
+                  <div className="symbol-results-panel">
+                    <div className="symbol-results-heading">{isSearchingYahoo ? 'Searching Yahoo Finance…' : yahooTicker.trim().length < 2 ? 'Instrument list' : `Search results${yahooSymbolResults.length ? ` · ${yahooSymbolResults.length}` : ''}`}</div>
+                    {yahooSearchError && <span className="symbol-search-error">{yahooSearchError} You can still enter a ticker directly.</span>}
+                    {yahooTicker.trim().length < 2 && <span className="symbol-results-empty">Type at least 2 characters to list matching Yahoo Finance instruments.</span>}
+                    {yahooTicker.trim().length > 0 && <button className="add-manual-symbol" onClick={() => { const symbol = yahooTicker.trim().toUpperCase(); if (symbol && !selectedYahooInstruments.some((item) => item.symbol === symbol)) setSelectedYahooInstruments((items) => [...items, { symbol, name: 'Manually entered ticker' }]); setYahooTicker(''); setYahooSymbolResults([]); setYahooSearchError('') }} type="button">Add “{yahooTicker.trim().toUpperCase()}” as a ticker</button>}
+                    {!isSearchingYahoo && yahooTicker.trim().length >= 2 && !yahooSearchError && yahooSymbolResults.length === 0 && <span className="symbol-results-empty">No matching instruments found. You can still use this exact ticker if you know it.</span>}
+                    {!isSearchingYahoo && yahooSymbolResults.length > 0 && <div className="symbol-suggestions" role="listbox" aria-label="Yahoo Finance instrument search results">
+                      {yahooSymbolResults.filter((result) => !selectedYahooInstruments.some((item) => item.symbol === result.symbol)).map((result) => <button aria-label={`Add ${result.symbol}, ${result.name}`} key={`${result.symbol}-${result.exchange}`} onClick={() => { setSelectedYahooInstruments((items) => [...items, { symbol: result.symbol, name: result.name }]); setYahooTicker(''); setYahooSymbolResults([]); setYahooSearchError('') }} role="option" type="button"><strong>＋ {result.symbol}</strong><span>{result.name}</span><small>{[result.type, result.exchange].filter(Boolean).join(' · ')}</small></button>)}
+                    </div>}
+                  </div>
+                </div>
+
+                <div className="config-grid">
+                  <label className="config-field"><span>Time interval</span><select onChange={(event) => setYahooInterval(event.target.value)} value={yahooInterval}>
+                    <option value="1m">1 minute</option><option value="2m">2 minutes</option><option value="5m">5 minutes</option><option value="15m">15 minutes</option><option value="30m">30 minutes</option><option value="60m">60 minutes</option><option value="90m">90 minutes</option><option value="1h">1 hour</option><option value="1d">Daily</option><option value="5d">5 days</option><option value="1wk">Weekly</option><option value="1mo">Monthly</option><option value="3mo">Quarterly</option>
+                  </select></label>
+                  <label className="config-field"><span>File format</span><select onChange={(event) => setYahooFormat(event.target.value)} value={yahooFormat}><option value="csv">CSV (.csv)</option><option value="parquet">Parquet (.parquet)</option></select></label>
+                  <label className="config-field"><span>Start date</span><input max={yahooToday} onChange={(event) => { setYahooStartDate(event.target.value); setYahooDownloadError(''); setYahooDownloadResult(null) }} type="date" value={yahooStartDate} /></label>
+                  <label className="config-field"><span>End date (inclusive)</span><input max={yahooToday} onChange={(event) => { setYahooEndDate(event.target.value); setYahooDownloadError(''); setYahooDownloadResult(null) }} type="date" value={yahooEndDate} /></label>
+                </div>
+
+                <div className="config-field destination-field"><label htmlFor="yahoo-destination">Destination folder</label><div className="destination-input-row"><input id="yahoo-destination" onChange={(event) => { setDownloadDestination(event.target.value); setYahooDownloadError(''); setYahooDownloadResult(null) }} placeholder="./data or /path/to/folder" spellCheck="false" type="text" value={downloadDestination} /><button className="secondary-button" onClick={beginSelectDownloadFolder} type="button">Choose in sidebar</button></div>{selectingDownloadFolder && <small className="destination-selection-hint">Select a folder from the <code>data/</code> tree on the left, or cancel to type a path.</small>}<small>Type an existing folder path or choose a folder in the left-side <code>data/</code> tree.</small></div>
+                <label className="config-field filename-template-field"><span>Filename pattern</span><input onChange={(event) => setYahooFilenameTemplate(event.target.value)} spellCheck="false" type="text" value={yahooFilenameTemplate} /><small>Standard pattern: <code>{'{name}_{ts}_{startdate}_{enddate}_{tz}_{provider}.{extension}'}</code>. Edit the pattern freely. Fields: name/symbol, ts (selected interval), startdate, enddate, tz (detected exchange timezone), provider, extension.</small></label>
+                <div className="yahoo-output-preview"><span>Example filename · first selected symbol</span><code>{yahooFilenamePreview}</code><small>Timezone is detected from Yahoo’s returned data. Each selected instrument gets its own file.</small></div>
+                {(yahooInterval.endsWith('m') || yahooInterval === '1h' || yahooInterval === '60m') && <p className="field-help interval-warning">Yahoo limits intraday history. 1-minute data is limited to about 8 days; other minute intervals to about 60 days; hourly data to about 2 years.</p>}
+                {yahooDownloadResult?.results?.length > 0 && <div className="yahoo-download-success" role="status"><strong>Downloaded {yahooDownloadResult.results.length} instrument{yahooDownloadResult.results.length === 1 ? '' : 's'}</strong>{yahooDownloadResult.results.map((result) => <span key={result.path}>{result.ticker}: {result.rows.toLocaleString()} rows saved to <code>{result.path}</code></span>)}</div>}
+                {yahooDownloadResult?.errors?.length > 0 && <div className="form-error yahoo-download-error">{yahooDownloadResult.errors.map((error) => <p key={`${error.ticker}-${error.error}`}>{error.ticker}: {error.error}</p>)}</div>}
+                <div className="yahoo-download-actions"><button className="primary-button" disabled={isYahooDownloading} type="submit">{isYahooDownloading ? 'Downloading…' : selectedYahooInstruments.length ? `Download ${selectedYahooInstruments.length} data file${selectedYahooInstruments.length === 1 ? '' : 's'}` : 'Check download settings'}</button>{isYahooDownloading && <span>Contacting Yahoo Finance. This may take a moment.</span>}</div>
+                {yahooDownloadProgress && <div className="yahoo-download-progress" role="status" aria-live="polite"><div className="yahoo-download-progress-heading"><strong>{isYahooDownloading ? yahooDownloadProgress.status : yahooDownloadProgress.status}</strong><span>{yahooDownloadProgress.completed} / {yahooDownloadProgress.total}</span></div><progress max={yahooDownloadProgress.total || 1} value={yahooDownloadProgress.completed} /><small>Progress advances as each instrument file finishes. {yahooDownloadProgress.currentTicker ? `Currently processing ${yahooDownloadProgress.currentTicker}.` : ''}</small></div>}
+                <p className="yahoo-provider-notice">Yahoo Finance access uses yfinance, an unofficial third-party interface. Yahoo data access is intended for personal use; review the provider’s terms before using or redistributing downloaded data.</p>
+              </form>
+            </section>
           </section>
         ) : isBacktesting ? (
           <section className="home-view">
-            <button aria-label="Back to Home" className="back-link" onClick={() => setActivePage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
+            <button aria-label="Back to Home" className="back-link" onClick={() => navigateToPage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">RESEARCH</div>
             <h1>Backtesting</h1>
             <p className="page-description">Choose a backtesting method.</p>
             <div className="workspace-tiles">
-              <button className="workspace-tile" onClick={() => setActivePage('simplebacktesting')} type="button">
+              <button className="workspace-tile" onClick={() => navigateToPage('simplebacktesting')} type="button">
                 <span className="tile-icon" aria-hidden="true">▤</span>
                 <span className="tile-copy"><strong>Simple Backtesting</strong><span>Strategy and data workspace · In progress</span></span>
                 <span className="tile-arrow" aria-hidden="true">→</span>
               </button>
-              <button className="workspace-tile" onClick={() => setActivePage('gridsearch')} type="button">
+              <button className="workspace-tile" onClick={() => navigateToPage('gridsearch')} type="button">
                 <span className="tile-icon" aria-hidden="true">▦</span>
                 <span className="tile-copy"><strong>GridSearch</strong><span>Parameter search · In progress</span></span>
                 <span className="tile-arrow" aria-hidden="true">→</span>
@@ -734,7 +1048,7 @@ function App() {
           </section>
         ) : isSimpleBacktesting ? (
           <section className="simple-backtest-view">
-            <button aria-label="Back to Backtesting" className="back-link" onClick={() => setActivePage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
+            <button aria-label="Back to Backtesting" className="back-link" onClick={() => navigateToPage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">BACKTESTING</div>
             <div className="simple-backtest-title-row">
               <h1>Simple Backtesting</h1>
@@ -837,28 +1151,45 @@ function App() {
           </section>
         ) : isGridSearch ? (
           <section className="home-view placeholder-view">
-            <button aria-label="Back to Backtesting" className="back-link" onClick={() => setActivePage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
+            <button aria-label="Back to Backtesting" className="back-link" onClick={() => navigateToPage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">BACKTESTING</div>
             <h1>GridSearch</h1>
             <span className="progress-badge">IN PROGRESS</span>
           </section>
         ) : isBuilder ? (
-          <section className="home-view placeholder-view">
-            <button aria-label="Back to Home" className="back-link" onClick={() => setActivePage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
-            <div className="eyebrow">WORKSPACE</div>
-            <h1>Code Workspace</h1>
-            <p className="page-description">Strategy and indicator authoring tools.</p>
-            <div className="workspace-tiles">
-              <div className="workspace-tile viewer-tile">
-                <span className="tile-icon" aria-hidden="true">◫</span>
-                <span className="tile-copy"><strong>Viewer</strong><span>In progress</span></span>
-                <span className="progress-badge">IN PROGRESS</span>
+          fileEditor ? (
+            <section className="file-editor-view">
+              <div className="file-editor-toolbar">
+                <button className="back-link" onClick={() => requestEditorAction({ type: 'close' })} title="Close file" type="button"><span aria-hidden="true">←</span> Code Workspace</button>
+                <span className="file-editor-status">{fileEditor.loading ? 'Opening…' : fileEditor.content !== fileEditor.savedContent ? 'Unsaved changes' : 'Saved'}</span>
               </div>
-            </div>
-          </section>
+              <div className="eyebrow">{fileEditor.scope === 'data' ? 'DATA FILE' : 'SOURCE FILE'}</div>
+              <h1>{fileEditor.name}</h1>
+              <p className="file-editor-path"><code>{fileEditor.scope === 'data' ? `./data/${fileEditor.path}` : `${builderPath.replace(/\/$/, '')}/${fileEditor.path}`}</code></p>
+              {fileEditor.format === 'parquet-json' && <p className="file-editor-help">Editing Parquet rows as JSON. Keep the original columns and value types; up to 5,000 rows are supported.</p>}
+              {fileEditor.error && <p className="form-error">{fileEditor.error}</p>}
+              {editorError && <p className="form-error">{editorError}</p>}
+              <textarea aria-label={`Edit ${fileEditor.name}`} className="workspace-file-editor" disabled={fileEditor.loading || editorSaving || Boolean(fileEditor.error)} onChange={(event) => { setFileEditor((current) => ({ ...current, content: event.target.value })); setEditorError('') }} spellCheck={false} value={fileEditor.content} />
+              <div className="file-editor-actions"><span>{fileEditor.format === 'parquet-json' ? 'Parquet · editable JSON table' : 'Text · UTF-8'}</span><button className="secondary-button" onClick={() => requestEditorAction({ type: 'close' })} type="button">Close file</button><button className="primary-button" disabled={fileEditor.loading || editorSaving || Boolean(fileEditor.error) || fileEditor.content === fileEditor.savedContent} onClick={saveCurrentWorkspaceFile} type="button">{editorSaving ? 'Saving…' : 'Save'}</button></div>
+            </section>
+          ) : (
+            <section className="home-view placeholder-view">
+              <button aria-label="Back to Home" className="back-link" onClick={() => navigateToPage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
+              <div className="eyebrow">WORKSPACE</div>
+              <h1>Code Workspace</h1>
+              <p className="page-description">Open a source file or market-data file from the project explorer to inspect and edit it.</p>
+              <div className="workspace-tiles">
+                <div className="workspace-tile viewer-tile">
+                  <span className="tile-icon" aria-hidden="true">◫</span>
+                  <span className="tile-copy"><strong>Viewer</strong><span>In progress</span></span>
+                  <span className="progress-badge">IN PROGRESS</span>
+                </div>
+              </div>
+            </section>
+          )
         ) : isSettings ? (
           <section className="settings-view">
-            <button aria-label="Back to More" className="back-link" onClick={() => setActivePage('more')} title="Back to More" type="button"><span aria-hidden="true">←</span></button>
+            <button aria-label="Back to More" className="back-link" onClick={() => navigateToPage('more')} title="Back to More" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">PREFERENCES</div>
             <h1>Settings</h1>
             <div className="settings-layout">
@@ -886,7 +1217,7 @@ function App() {
             <div className="eyebrow">WORKSPACE</div>
             <h1>More</h1>
             <div className="more-options">
-              <button className="more-option more-option-button" onClick={() => { setSettingsSection('general'); setActivePage('settings') }} type="button"><span>Settings</span><span aria-hidden="true">›</span></button>
+              <button className="more-option more-option-button" onClick={() => { setSettingsSection('general'); navigateToPage('settings') }} type="button"><span>Settings</span><span aria-hidden="true">›</span></button>
               <div className="more-option">
                 <span>Profile</span><span className="progress-badge">IN PROGRESS</span>
               </div>
@@ -1005,6 +1336,39 @@ function App() {
         </div>
       )}
 
+      {yahooOverwritePrompt && (
+        <div className="dialog-backdrop" onMouseDown={backFromYahooOverwrite}>
+          <section aria-labelledby="yahoo-overwrite-title" aria-modal="true" className="path-dialog yahoo-overwrite-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <div className="eyebrow">DATA · EXISTING FILE</div>
+            <h2 id="yahoo-overwrite-title">Data already stored</h2>
+            <p>A file with this name is already in the selected destination:</p>
+            <ul className="yahoo-overwrite-files">{yahooOverwritePrompt.conflicts.map((conflict) => <li key={conflict.filename}><strong>{conflict.ticker}</strong><code>{conflict.filename}</code></li>)}</ul>
+            <p>Overwrite the listed file and continue the remaining downloads? Choosing Back leaves existing files unchanged and stops the rest of this batch.</p>
+            <div className="dialog-actions">
+              <button className="secondary-button" disabled={isYahooDownloading} onClick={backFromYahooOverwrite} type="button">Back</button>
+              <button className="primary-button" disabled={isYahooDownloading} onClick={overwriteYahooDataFiles} type="button">{isYahooDownloading ? 'Overwriting…' : 'Overwrite files'}</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {unsavedPromptOpen && (
+        <div className="dialog-backdrop" onMouseDown={() => resolveUnsavedPrompt('cancel')}>
+          <section aria-labelledby="unsaved-changes-title" aria-modal="true" className="path-dialog unsaved-changes-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <div className="eyebrow">CODE WORKSPACE · UNSAVED FILE</div>
+            <h2 id="unsaved-changes-title">Save your changes?</h2>
+            <p>You have unsaved changes in <strong>{fileEditor?.name}</strong>.</p>
+            <p>Save them before leaving this file?</p>
+            {unsavedPromptError && <p className="form-error">{unsavedPromptError}</p>}
+            <div className="dialog-actions">
+              <button className="secondary-button" disabled={editorSaving} onClick={() => resolveUnsavedPrompt('cancel')} type="button">Cancel</button>
+              <button className="secondary-button discard-changes-button" disabled={editorSaving} onClick={() => resolveUnsavedPrompt('discard')} type="button">Don’t Save</button>
+              <button className="primary-button" disabled={editorSaving} onClick={() => resolveUnsavedPrompt('save')} type="button">{editorSaving ? 'Saving…' : 'Save changes'}</button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {compileSuccessNotice && (
         <div aria-live="polite" className={`compile-success-toast ${compileSuccessNotice.fading ? 'is-fading' : ''}`} role="status">
           <span className="status-dot" />{compileSuccessNotice.message}
@@ -1012,13 +1376,13 @@ function App() {
       )}
 
       <nav aria-label="Main navigation" className="bottom-bar">
-        <button aria-label="Backtesting" className={isBacktestingSection ? 'is-active' : ''} onClick={() => setActivePage('backtesting')} type="button">
+        <button aria-label="Backtesting" className={isBacktestingSection ? 'is-active' : ''} onClick={() => navigateToPage('backtesting')} type="button">
           <span aria-hidden="true">⌁</span><span>Backtesting</span>
         </button>
-        <button aria-label="Home" className={isHome ? 'is-active' : ''} onClick={() => setActivePage('home')} type="button">
+        <button aria-label="Home" className={isHome ? 'is-active' : ''} onClick={() => navigateToPage('home')} type="button">
           <span aria-hidden="true">⌂</span><span>Home</span>
         </button>
-        <button aria-label="More" className={activePage === 'more' ? 'is-active' : ''} onClick={() => setActivePage('more')} type="button">
+        <button aria-label="More" className={activePage === 'more' ? 'is-active' : ''} onClick={() => navigateToPage('more')} type="button">
           <span aria-hidden="true">⋯</span><span>More</span>
         </button>
       </nav>

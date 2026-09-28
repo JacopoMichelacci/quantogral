@@ -9,10 +9,14 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from quantogral.data.providers.yfinance import DataAlreadyExistsError, download_yahoo_history, search_yahoo_symbols
 
 DEFAULT_BUILDER_PATH = "./cpp/include/builder"
 PROJECT_ROOT = Path(os.environ.get("QUANTOGRAL_ROOT", Path(__file__).resolve().parents[3]))
@@ -23,6 +27,8 @@ CORE_SOURCES = [CPP_ROOT / "src" / "core" / "market_events.cpp", CPP_ROOT / "src
 BUILD_DIR = PROJECT_ROOT / ".quantogral" / "build"
 RUNNER_BINARY = BUILD_DIR / "quantogral_backtest"
 BUILD_LOCK = threading.Lock()
+YAHOO_DOWNLOAD_JOBS: dict[str, dict[str, Any]] = {}
+YAHOO_DOWNLOAD_JOBS_LOCK = threading.Lock()
 
 STRATEGY_CATALOG = [{
     "id": "ma_cross",
@@ -172,6 +178,95 @@ def safe_workspace_path(root: Path, relative_path: Any, must_exist: bool = True)
     if resolved != root and root not in resolved.parents:
         raise WorkspaceItemError("Items can only be changed inside their current workspace folder.")
     return resolved
+
+
+WORKSPACE_EDITABLE_TEXT_SUFFIXES = {".hpp", ".h", ".cpp", ".cc", ".cxx", ".c", ".py", ".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".sh", ".csv"}
+WORKSPACE_PARQUET_SUFFIXES = {".parquet", ".pq"}
+WORKSPACE_EDITOR_MAX_BYTES = 8 * 1024 * 1024
+WORKSPACE_PARQUET_EDITOR_MAX_ROWS = 5000
+
+
+def workspace_file_target(payload: dict[str, Any]) -> tuple[Path, str]:
+    root = workspace_root(payload.get("scope"))
+    target = safe_workspace_path(root, payload.get("path"))
+    if not target.is_file():
+        raise WorkspaceItemError("Choose a file to open.")
+    suffix = target.suffix.lower()
+    if suffix not in WORKSPACE_EDITABLE_TEXT_SUFFIXES | WORKSPACE_PARQUET_SUFFIXES:
+        raise WorkspaceItemError("The editor supports C/C++ source, text, CSV, and Parquet files.", HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+    if target.stat().st_size > WORKSPACE_EDITOR_MAX_BYTES:
+        raise WorkspaceItemError("This file is larger than the 8 MB editor limit. Open a smaller file or edit it outside Quantogral.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+    return target, suffix
+
+
+def read_workspace_file(payload: dict[str, Any]) -> dict[str, Any]:
+    target, suffix = workspace_file_target(payload)
+    if suffix in WORKSPACE_PARQUET_SUFFIXES:
+        try:
+            import polars as pl
+        except ImportError as error:
+            raise RuntimeError("Parquet editing needs the project's Polars dependency. Run `uv sync` and restart Quantogral.") from error
+        try:
+            frame = pl.scan_parquet(target).limit(WORKSPACE_PARQUET_EDITOR_MAX_ROWS + 1).collect()
+        except Exception as error:
+            raise WorkspaceItemError(f"Could not read this Parquet file: {error}") from error
+        if frame.height > WORKSPACE_PARQUET_EDITOR_MAX_ROWS:
+            raise WorkspaceItemError("The Parquet editor currently supports up to 5,000 rows per file.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        content = json.dumps({"columns": frame.columns, "rows": frame.to_dicts()}, ensure_ascii=False, indent=2, default=str)
+        return {"name": target.name, "format": "parquet-json", "content": content, "rows": frame.height, "columns": frame.columns}
+    try:
+        content = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise WorkspaceItemError("This file is not UTF-8 text and cannot be opened in the editor.", HTTPStatus.UNSUPPORTED_MEDIA_TYPE) from error
+    return {"name": target.name, "format": "text", "content": content}
+
+
+def save_workspace_file(payload: dict[str, Any]) -> dict[str, str]:
+    target, suffix = workspace_file_target(payload)
+    content = payload.get("content")
+    if not isinstance(content, str):
+        raise WorkspaceItemError("File content must be text.")
+    if len(content.encode("utf-8")) > WORKSPACE_EDITOR_MAX_BYTES:
+        raise WorkspaceItemError("The edited file exceeds the 8 MB editor limit.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        temporary_path = Path(temporary_name)
+        if suffix in WORKSPACE_PARQUET_SUFFIXES:
+            os.close(descriptor)
+            try:
+                import polars as pl
+            except ImportError as error:
+                raise RuntimeError("Parquet editing needs the project's Polars dependency. Run `uv sync` and restart Quantogral.") from error
+            try:
+                document = json.loads(content)
+                columns, rows = document["columns"], document["rows"]
+                original = pl.scan_parquet(target).limit(WORKSPACE_PARQUET_EDITOR_MAX_ROWS + 1).collect()
+                if original.height > WORKSPACE_PARQUET_EDITOR_MAX_ROWS:
+                    raise ValueError("The Parquet file exceeds the 5,000-row editor limit.")
+                if columns != original.columns or not isinstance(rows, list) or len(rows) > WORKSPACE_PARQUET_EDITOR_MAX_ROWS:
+                    raise ValueError("Keep the existing Parquet columns and use no more than 5,000 rows.")
+                if any(not isinstance(row, dict) or set(row) != set(columns) for row in rows):
+                    raise ValueError("Each Parquet row must contain exactly the file's existing columns.")
+                frame = pl.DataFrame(rows, schema=original.schema, strict=True)
+                frame.write_parquet(temporary_path)
+            except Exception as error:
+                raise WorkspaceItemError(f"Could not save Parquet rows: {error}") from error
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as output_file:
+                output_file.write(content)
+        os.chmod(temporary_path, target.stat().st_mode)
+        os.replace(temporary_path, target)
+    except WorkspaceItemError:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+    except Exception as error:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise WorkspaceItemError(f"Could not save {target.name}: {error}", HTTPStatus.INTERNAL_SERVER_ERROR) from error
+    return {"name": target.name, "path": str(target)}
 
 
 def validate_item_name(raw_name: Any, allow_folder_suffix: bool) -> tuple[str, bool]:
@@ -398,11 +493,97 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     return output
 
 
+def run_yahoo_download_job(
+    job_id: str, payload: dict[str, Any], *, overwrite_files: set[str] | None = None, initial_completed: int = 0,
+) -> None:
+    """Download each selected Yahoo instrument sequentially while publishing job progress."""
+    destination = Path(payload["destination"]).expanduser()
+    tickers = list(dict.fromkeys(item.strip() for item in payload["tickers"]))
+    for offset, ticker in enumerate(tickers):
+        index = initial_completed + offset + 1
+        with YAHOO_DOWNLOAD_JOBS_LOCK:
+            job = YAHOO_DOWNLOAD_JOBS[job_id]
+            job["currentTicker"] = ticker
+            job["status"] = f"Downloading {ticker} ({index} of {len(tickers)})"
+        try:
+            result = download_yahoo_history(
+                ticker=ticker,
+                interval=payload.get("interval"),
+                start_date=payload.get("startDate"),
+                end_date=payload.get("endDate"),
+                file_format=payload.get("format"),
+                destination=destination,
+                filename_template=payload.get("filenameTemplate"),
+                overwrite_filenames=overwrite_files,
+            )
+            with YAHOO_DOWNLOAD_JOBS_LOCK:
+                job = YAHOO_DOWNLOAD_JOBS[job_id]
+                job["results"].append(result)
+        except DataAlreadyExistsError as error:
+            with YAHOO_DOWNLOAD_JOBS_LOCK:
+                job = YAHOO_DOWNLOAD_JOBS[job_id]
+                job["conflicts"].append({"ticker": ticker, "filename": error.output_filename})
+                job["needsConfirmation"] = True
+                job["resumeTickers"] = tickers[offset:]
+                job["finished"] = True
+                job["currentTicker"] = None
+                job["status"] = "Data already stored"
+            return
+        except Exception as error:
+            with YAHOO_DOWNLOAD_JOBS_LOCK:
+                job = YAHOO_DOWNLOAD_JOBS[job_id]
+                job["errors"].append({"ticker": ticker, "error": str(error)})
+        with YAHOO_DOWNLOAD_JOBS_LOCK:
+            YAHOO_DOWNLOAD_JOBS[job_id]["completed"] = index
+
+    with YAHOO_DOWNLOAD_JOBS_LOCK:
+        job = YAHOO_DOWNLOAD_JOBS[job_id]
+        job["finished"] = True
+        job["currentTicker"] = None
+        job["status"] = "Download finished"
+
+
 class ConfigHandler(BaseHTTPRequestHandler):
     """Serve and update local workspace configuration."""
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/api/builder/tree":
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == "/api/health":
+            self.send_json({"status": "ok"})
+            return
+        yahoo_job_prefix = "/api/data/yahoo/download/"
+        if parsed_path.path.startswith(yahoo_job_prefix):
+            job_id = parsed_path.path.removeprefix(yahoo_job_prefix)
+            with YAHOO_DOWNLOAD_JOBS_LOCK:
+                job = YAHOO_DOWNLOAD_JOBS.get(job_id)
+                snapshot = ({key: value for key, value in job.items() if not key.startswith("_")}) if job else None
+                if snapshot is not None:
+                    snapshot["results"] = list(job["results"])
+                    snapshot["errors"] = list(job["errors"])
+            if snapshot is None:
+                self.send_json({"error": "Yahoo Finance download job not found."}, HTTPStatus.NOT_FOUND)
+            else:
+                self.send_json(snapshot)
+            return
+        if parsed_path.path == "/api/data/yahoo/search":
+            query = parse_qs(parsed_path.query).get("q", [""])[0]
+            try:
+                self.send_json({"results": search_yahoo_symbols(query)})
+            except Exception as error:
+                self.send_json({"error": f"Yahoo Finance symbol search failed: {error}"}, HTTPStatus.BAD_GATEWAY)
+            return
+
+        if parsed_path.path == "/api/workspace/file":
+            query = parse_qs(parsed_path.query)
+            try:
+                self.send_json(read_workspace_file({"scope": query.get("scope", [""])[0], "path": query.get("path", [""])[0]}))
+            except WorkspaceItemError as error:
+                self.send_json({"error": str(error)}, error.status)
+            except RuntimeError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if parsed_path.path == "/api/builder/tree":
             config, _ = read_config()
             configured_path = Path(config["builder"]["path"]).expanduser()
             builder_path = configured_path if configured_path.is_absolute() else PROJECT_ROOT / configured_path
@@ -433,7 +614,7 @@ class ConfigHandler(BaseHTTPRequestHandler):
         self.send_json({**config, "builderConfigured": builder_configured})
 
     def do_PUT(self) -> None:  # noqa: N802
-        if self.path not in {"/api/config/builder", "/api/workspace/items"}:
+        if self.path not in {"/api/config/builder", "/api/workspace/items", "/api/workspace/file"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -452,6 +633,15 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, error.status)
             except OSError as error:
                 self.send_json({"error": f"Could not rename item: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if self.path == "/api/workspace/file":
+            try:
+                self.send_json(save_workspace_file(payload))
+            except WorkspaceItemError as error:
+                self.send_json({"error": str(error)}, error.status)
+            except RuntimeError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         try:
@@ -513,6 +703,77 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, HTTPStatus.CONFLICT)
             except (OSError, json.JSONDecodeError, TypeError) as error:
                 self.send_json({"error": f"Could not run backtest: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        overwrite_prefix = "/api/data/yahoo/download/"
+        if self.path.startswith(overwrite_prefix) and self.path.endswith("/overwrite"):
+            job_id = self.path[len(overwrite_prefix):-len("/overwrite")]
+            with YAHOO_DOWNLOAD_JOBS_LOCK:
+                job = YAHOO_DOWNLOAD_JOBS.get(job_id)
+                if job is None or not job.get("needsConfirmation"):
+                    self.send_json({"error": "There are no existing data files awaiting confirmation."}, HTTPStatus.CONFLICT)
+                    return
+                resume_payload = {**job["_payload"], "tickers": list(job["resumeTickers"])}
+                initial_completed = job["completed"]
+                approved_files = {item["filename"] for item in job["conflicts"]}
+                job["needsConfirmation"] = False
+                job["finished"] = False
+                job["conflicts"] = []
+                job["status"] = "Overwriting confirmed files…"
+            thread = threading.Thread(
+                target=run_yahoo_download_job,
+                kwargs={"job_id": job_id, "payload": resume_payload, "overwrite_files": approved_files, "initial_completed": initial_completed},
+                daemon=True,
+            )
+            thread.start()
+            self.send_json({"jobId": job_id}, HTTPStatus.ACCEPTED)
+            return
+
+        if self.path == "/api/data/yahoo/download":
+            try:
+                tickers = payload.get("tickers")
+                if not isinstance(tickers, list) or not tickers or any(not isinstance(item, str) or not item.strip() for item in tickers):
+                    raise ValueError("Choose at least one Yahoo Finance instrument.")
+                destination_value = payload.get("destination")
+                if not isinstance(destination_value, str) or not destination_value.strip():
+                    raise ValueError("Choose a destination folder.")
+                destination_path = Path(destination_value.strip()).expanduser()
+                if not destination_path.is_absolute():
+                    destination_path = PROJECT_ROOT / destination_path
+                destination_path = destination_path.resolve(strict=True)
+                if not destination_path.is_dir():
+                    raise ValueError("Choose an existing destination folder.")
+                unique_tickers = list(dict.fromkeys(item.strip() for item in tickers))
+                job_id = uuid.uuid4().hex
+                with YAHOO_DOWNLOAD_JOBS_LOCK:
+                    YAHOO_DOWNLOAD_JOBS[job_id] = {
+                        "jobId": job_id,
+                        "completed": 0,
+                        "total": len(unique_tickers),
+                        "currentTicker": None,
+                        "status": "Starting download…",
+                        "finished": False,
+                        "results": [],
+                        "errors": [],
+                        "conflicts": [],
+                        "needsConfirmation": False,
+                        "_payload": {**payload, "tickers": unique_tickers, "destination": str(destination_path)},
+                    }
+                thread = threading.Thread(
+                    target=run_yahoo_download_job,
+                    args=(job_id, {**payload, "tickers": unique_tickers, "destination": str(destination_path)}),
+                    daemon=True,
+                )
+                thread.start()
+                self.send_json({"jobId": job_id}, HTTPStatus.ACCEPTED)
+            except FileExistsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.CONFLICT)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            except RuntimeError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            except OSError as error:
+                self.send_json({"error": f"Could not access the download destination: {error}"}, HTTPStatus.BAD_REQUEST)
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)
