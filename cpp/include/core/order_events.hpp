@@ -10,8 +10,11 @@ enum class SIGNAL : std::int8_t {
     FLAT = 0,
     LONG = 1,
     COVER = 2,
-    BBUY = 9,
-    BSELL = -9,
+    BLONG = 9,
+    BSHORT = -9,
+    // Compatibility aliases for strategies written against the earlier names.
+    BBUY = BLONG,
+    BSELL = BSHORT,
 };
 std::ostream& operator<<(std::ostream& os, SIGNAL signal);
 

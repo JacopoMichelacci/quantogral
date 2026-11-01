@@ -162,8 +162,8 @@ const char* signal_name(SIGNAL signal) {
         case SIGNAL::FLAT: return "FLAT";
         case SIGNAL::LONG: return "LONG";
         case SIGNAL::COVER: return "COVER";
-        case SIGNAL::BBUY: return "BUY";
-        case SIGNAL::BSELL: return "SELL";
+        case SIGNAL::BLONG: return "BLONG";
+        case SIGNAL::BSHORT: return "BSHORT";
     }
     return "UNKNOWN";
 }
@@ -282,6 +282,22 @@ void print_results(const BacktestRunResults& results, std::size_t input_rows, co
             print_equity_curve(strategy.results.equity_curve);
             std::cout << ",\"orders\":";
             print_orders(strategy.results.hlog, rates);
+            std::cout << ",\"indicators\":[";
+            for (std::size_t indicator_index = 0; indicator_index < strategy.results.indicators.size(); ++indicator_index) {
+                const auto& indicator = strategy.results.indicators[indicator_index];
+                if (indicator_index) std::cout << ',';
+                std::cout << "{\"name\":\"" << json_escape(indicator.name)
+                          << "\",\"feedId\":\"" << json_escape(indicator.feed_id)
+                          << "\",\"points\":[";
+                const auto point_count = std::min(indicator.timestamps.size(), indicator.values.size());
+                for (std::size_t point_index = 0; point_index < point_count; ++point_index) {
+                    if (point_index) std::cout << ',';
+                    std::cout << "{\"timestamp\":" << indicator.timestamps[point_index]
+                              << ",\"value\":" << indicator.values[point_index] << '}';
+                }
+                std::cout << "]}";
+            }
+            std::cout << ']';
             std::cout << '}';
         }
         std::cout << "]}";

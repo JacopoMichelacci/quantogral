@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "builder/indicators/indicator_base.hpp"
 #include "builder/strategies/strategy_base.hpp"
 #include "core/order_events.hpp"
 
@@ -19,6 +20,13 @@ struct BacktestResults {
     std::vector<double> equity_curve;
     std::vector<long long> equity_timestamps;
     std::vector<OrderEvent> hlog;
+    struct IndicatorTrace {
+        std::string name;
+        std::string feed_id;
+        std::vector<long long> timestamps;
+        std::vector<double> values;
+    };
+    std::vector<IndicatorTrace> indicators;
 };
 
 template <typename Tin>
@@ -234,6 +242,8 @@ public:
             std::unordered_map<std::string, std::vector<PendingOrder>> pending;
             std::unordered_set<long long> pending_stop_lots;
             std::vector<OrderEvent> orders;
+            std::unordered_map<const void*, std::string> indicator_names;
+            std::unordered_map<std::string, std::size_t> indicator_name_counts;
             OrderIdGenerator id_generator;
             BacktestResults results;
         };
@@ -412,6 +422,32 @@ public:
                     context.feeds = feed_views;
                     context.account_currency_per_native_unit_ = feed.account_currency_rate(cursor.event_index);
                     state.orders.clear();
+                    struct IndicatorCapture {
+                        StrategyState* state;
+                        long long timestamp;
+                        const std::string* feed_id;
+                    } indicator_capture{&state, timestamp, &feed.id};
+                    const auto trace_indicator = +[](const void* source, std::string_view raw_name, double value, void* opaque) {
+                        auto& capture = *static_cast<IndicatorCapture*>(opaque);
+                        auto [name_it, inserted] = capture.state->indicator_names.try_emplace(source);
+                        if (inserted) {
+                            std::string base_name(raw_name);
+                            const auto occurrence = ++capture.state->indicator_name_counts[base_name];
+                            name_it->second = occurrence == 1 ? base_name : base_name + " #" + std::to_string(occurrence);
+                        }
+                        const auto trace_name = name_it->second;
+                        auto& traces = capture.state->results.indicators;
+                        auto trace = std::find_if(traces.begin(), traces.end(), [&](const auto& item) {
+                            return item.name == trace_name && item.feed_id == *capture.feed_id;
+                        });
+                        if (trace == traces.end()) {
+                            traces.push_back({trace_name, *capture.feed_id, {}, {}});
+                            trace = std::prev(traces.end());
+                        }
+                        trace->timestamps.push_back(capture.timestamp);
+                        trace->values.push_back(value);
+                    };
+                    quantogral::detail::IndicatorTraceScope indicator_trace_scope(trace_indicator, &indicator_capture);
                     binding.strategy->on_data(event, context, state.orders);
                     for (auto& order : state.orders) {
                         if (order.signal == SIGNAL::FLAT) continue;
@@ -689,7 +725,7 @@ private:
         const bool short_allowed = settings.short_active && config_.direction_mode != TRADE_DIRECTION_MODE::LONG_ONLY;
         for (auto& order : orders) {
             if (order.signal == SIGNAL::FLAT) continue;
-            const bool is_buy = order.signal == SIGNAL::LONG || order.signal == SIGNAL::BBUY || order.signal == SIGNAL::COVER;
+            const bool is_buy = order.signal == SIGNAL::LONG || order.signal == SIGNAL::BLONG || order.signal == SIGNAL::COVER;
             const double price = is_buy ? BacktestEventTraits<Tin>::buy_price(event) : BacktestEventTraits<Tin>::sell_price(event);
             order.price = price;
             order.ts = timestamp;
@@ -748,7 +784,7 @@ private:
                     fill_buy(order, price, currency_rate, cash, position);
                     close_open_lots(lots, SIGNAL::SHORT, order, history, id_generator);
                     break;
-                case SIGNAL::BBUY: {
+                case SIGNAL::BLONG: {
                     if ((!long_allowed && (position >= 0.0 || order.qty > -position)) ||
                         (!settings.stacking && position > 0.0)) {
                         reject(order, "buy order not allowed"); history.push_back(order); break;
@@ -773,7 +809,7 @@ private:
                     }
                     break;
                 }
-                case SIGNAL::BSELL: {
+                case SIGNAL::BSHORT: {
                     if ((!short_allowed && (position <= 0.0 || order.qty > position)) ||
                         (!settings.stacking && position < 0.0)) {
                         reject(order, "sell order not allowed"); history.push_back(order); break;

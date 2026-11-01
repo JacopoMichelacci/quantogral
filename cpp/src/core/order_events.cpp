@@ -7,8 +7,8 @@ std::ostream& operator<<(std::ostream& os, SIGNAL signal) {
         case SIGNAL::FLAT: return os << "flat";
         case SIGNAL::LONG: return os << "long";
         case SIGNAL::COVER: return os << "cover";
-        case SIGNAL::BBUY: return os << "bbuy";
-        case SIGNAL::BSELL: return os << "bsell";
+        case SIGNAL::BLONG: return os << "blong";
+        case SIGNAL::BSHORT: return os << "bshort";
     }
     return os;
 }

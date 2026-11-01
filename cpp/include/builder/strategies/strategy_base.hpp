@@ -92,6 +92,12 @@ enum class SIZING_MODE {
     FIXED_FRACTIONAL_SL
 };
 
+struct SizingConfig {
+    SIZING_MODE mode = SIZING_MODE::FIXED;
+    double qty = 1.0;
+    double equity_pct = 0.05;
+};
+
 
 struct SharedStrategyBase {
 protected:

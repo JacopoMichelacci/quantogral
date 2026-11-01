@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #include "builder/indicators/indicator_base.hpp"
@@ -10,6 +11,8 @@
 template <typename Tin, typename Tout>
 class SMA : public Indicator<SMA<Tin, Tout>, Tin, Tout> {
 public:
+    static constexpr std::string_view trace_type_name = "SMA";
+
     explicit SMA(int len_, int max_buffer_size_ = -1)
         : Indicator<SMA<Tin, Tout>, Tin, Tout>(max_buffer_size_), len(len_) {
         if (len_ < 1) throw std::invalid_argument("SMA len must be > 0");

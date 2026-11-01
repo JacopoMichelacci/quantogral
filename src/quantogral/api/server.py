@@ -110,57 +110,84 @@ def _strategy_config_fields(source: str, class_name: str, header: Path) -> list[
     if not alias:
         raise RuntimeError(f"{header.name}: strategy must expose `using Config = YourConfigType;`.")
     config_type = alias.group(1)
-    config_start_match = re.search(rf"\bstruct\s+{re.escape(config_type)}\s*\{{", source)
+    all_headers = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in (CPP_ROOT / "include").rglob("*.hpp"))
+    config_source = source + "\n" + all_headers
+    config_start_match = re.search(rf"\bstruct\s+{re.escape(config_type)}\s*{{", config_source)
     if not config_start_match:
         raise RuntimeError(f"{header.name}: could not find the config struct `{config_type}`.")
-    config_start = source.find("{", config_start_match.start())
-    config_body = source[config_start + 1:_matching_brace(source, config_start)]
+    config_start = config_source.find("{", config_start_match.start())
+    config_body = config_source[config_start + 1:_matching_brace(config_source, config_start)]
     enum_types: dict[str, list[str]] = {}
-    for enum_match in re.finditer(r"enum\s+class\s+([A-Za-z_]\w*)[^\{]*\{([^}]*)\}", "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in (CPP_ROOT / "include").rglob("*.hpp"))):
+    for enum_match in re.finditer(r"enum\s+class\s+([A-Za-z_]\w*)[^\{]*\{([^}]*)\}", all_headers):
         enum_types[enum_match.group(1)] = [part.strip().split("=")[0].strip() for part in enum_match.group(2).split(",") if part.strip()]
-    fields: list[dict[str, Any]] = []
-    cpp_type_pattern = r"(?:unsigned\s+int|long\s+double|long\s+long|unsigned|short|int|long|float|double|bool|size_t|std::size_t|std::string|[A-Za-z_]\w*(?:::\w+)*)"
+    struct_bodies: dict[str, str] = {}
+    for struct_match in re.finditer(r"\bstruct\s+([A-Za-z_]\w*)\s*\{", all_headers):
+        struct_start = all_headers.find("{", struct_match.start())
+        struct_bodies[struct_match.group(1)] = all_headers[struct_start + 1:_matching_brace(all_headers, struct_start)]
+    cpp_type_pattern = r"(?:unsigned\s+int|long\s+double|long\s+long|unsigned|short|int|long|float|double|bool|size_t|std::size_t|std::string|[A-Za-z_]\w*(?:::\w*)*)"
     field_pattern = re.compile(rf"^\s*({cpp_type_pattern})\s+([A-Za-z_]\w*)\s*=\s*(.+?)\s*$", re.S)
-    declarations = re.split(r";", re.sub(r"/\*.*?\*/|//[^\n]*", "", config_body, flags=re.S))
-    for declaration in declarations:
-        if not declaration.strip() or declaration.lstrip().startswith("static_assert"):
-            continue
-        field = field_pattern.match(declaration)
-        if not field:
-            raise RuntimeError(f"{header.name}: config fields need a simple type, name, and default initializer: {declaration.strip()}")
-        cpp_type, key, default_expr = field.groups()
-        default_expr = default_expr.strip()
-        enum_name = cpp_type.split("::")[-1]
-        if enum_name in enum_types:
-            options = enum_types[enum_name]
-            default = default_expr.split("::")[-1]
-            if default not in options:
-                raise RuntimeError(f"{header.name}: `{key}` has an enum default not found in {enum_name}.")
-            field_type = "select"
-        elif cpp_type == "bool":
-            if default_expr.lower() not in {"true", "false"}:
-                raise RuntimeError(f"{header.name}: `{key}` boolean defaults must be `true` or `false`.")
-            options, field_type, default = None, "boolean", default_expr.lower() == "true"
-        elif cpp_type in {"std::string", "string"}:
-            options, field_type = None, "text"
-            try:
-                default = json.loads(default_expr)
-            except json.JSONDecodeError as error:
-                raise RuntimeError(f"{header.name}: `{key}` string defaults must use a quoted literal.") from error
-        elif cpp_type in {"float", "double", "long double"}:
-            options, field_type = None, "number"
-            default = float(default_expr.rstrip("fFlL"))
-        elif cpp_type in {"short", "int", "long", "long long", "std::int8_t", "std::int16_t", "std::int32_t", "std::int64_t", "std::uint8_t", "std::uint16_t", "std::uint32_t", "std::uint64_t", "unsigned", "unsigned int", "size_t", "std::size_t"}:
-            options, field_type = None, "number"
-            default = int(default_expr.rstrip("uUlL"), 0)
-        else:
-            raise RuntimeError(f"{header.name}: automatic settings support bool, numeric, string, and enum fields; `{key}` uses `{cpp_type}`.")
-        item: dict[str, Any] = {"key": key, "type": field_type, "default": default, "_cppType": cpp_type}
-        if options is not None:
-            item["options"] = options
-        fields.append(item)
-    return fields
+    fields: list[dict[str, Any]] = []
 
+    def parse_fields(body: str, key_prefix: str = "", cpp_prefix: str = "", group: str | None = None, struct_name: str | None = None) -> None:
+        declarations = re.split(r";", re.sub(r"/\*.*?\*/|//[^\n]*", "", body, flags=re.S))
+        for declaration in declarations:
+            declaration = declaration.strip()
+            if not declaration or declaration.startswith("static_assert"):
+                continue
+            nested = re.match(r"^([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*=\s*\{\s*\}$", declaration)
+            if nested and nested.group(1) in struct_bodies:
+                nested_type, nested_key = nested.groups()
+                nested_group = group or re.sub(r"Config$", "", re.sub(r"(?<!^)([A-Z])", r" \1", nested_type)).strip()
+                nested_key_path = f"{key_prefix}.{nested_key}" if key_prefix else nested_key
+                nested_cpp_path = f"{cpp_prefix}.{nested_key}" if cpp_prefix else nested_key
+                parse_fields(struct_bodies[nested_type], nested_key_path, nested_cpp_path, nested_group, nested_type)
+                continue
+            field = field_pattern.match(declaration)
+            if not field:
+                raise RuntimeError(f"{header.name}: config fields need simple fields or default-initialized nested config structs: {declaration}")
+            cpp_type, key, default_expr = field.groups()
+            default_expr = default_expr.strip()
+            full_key = f"{key_prefix}.{key}" if key_prefix else key
+            cpp_path = f"{cpp_prefix}.{key}" if cpp_prefix else key
+            enum_name = cpp_type.split("::")[-1]
+            if enum_name in enum_types:
+                options = enum_types[enum_name]
+                default = default_expr.split("::")[-1]
+                if default not in options:
+                    raise RuntimeError(f"{header.name}: `{full_key}` has an enum default not found in {enum_name}.")
+                field_type = "select"
+            elif cpp_type == "bool":
+                if default_expr.lower() not in {"true", "false"}:
+                    raise RuntimeError(f"{header.name}: `{full_key}` boolean defaults must be `true` or `false`.")
+                options, field_type, default = None, "boolean", default_expr.lower() == "true"
+            elif cpp_type in {"std::string", "string"}:
+                options, field_type = None, "text"
+                try:
+                    default = json.loads(default_expr)
+                except json.JSONDecodeError as error:
+                    raise RuntimeError(f"{header.name}: `{full_key}` string defaults must use a quoted literal.") from error
+            elif cpp_type in {"float", "double", "long double"}:
+                options, field_type = None, "number"
+                default = float(default_expr.rstrip("fFlL"))
+            elif cpp_type in {"short", "int", "long", "long long", "std::int8_t", "std::int16_t", "std::int32_t", "std::uint8_t", "std::uint16_t", "std::uint32_t", "std::uint64_t", "unsigned", "unsigned int", "size_t", "std::size_t"}:
+                options, field_type = None, "number"
+                default = int(default_expr.rstrip("uUlL"), 0)
+            else:
+                raise RuntimeError(f"{header.name}: automatic settings support bool, numeric, string, enum, and nested config fields; `{full_key}` uses `{cpp_type}.")
+            item: dict[str, Any] = {"key": full_key, "type": field_type, "default": default, "_cppType": cpp_type, "_cppPath": cpp_path}
+            if group:
+                item["group"] = group
+                item["label"] = key
+            if options is not None:
+                item["options"] = options
+            if struct_name == "SizingConfig" and key == "qty":
+                item["visibleWhen"] = {"key": f"{key_prefix}.mode", "values": ["FIXED"]}
+            elif struct_name == "SizingConfig" and key == "equity_pct":
+                item["visibleWhen"] = {"key": f"{key_prefix}.mode", "values": ["FIXED_FRACTIONAL_PRICE", "FIXED_FRACTIONAL_SL"]}
+            fields.append(item)
+
+    parse_fields(config_body)
+    return fields
 
 def write_generated_registry(headers: list[Path]) -> None:
     BUILD_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -182,21 +209,23 @@ def write_generated_registry(headers: list[Path]) -> None:
         factory = [f"inline std::unique_ptr<Strategy<OHLCVEvent>> qg_create_{safe_id}(const quantogral::StrategyValues& values) {{", f"    {config_type} config{{}};"]
         for item in fields:
             key = item["key"]
+            cpp_path = item.get("_cppPath", key)
+            safe_key = re.sub(r"\W", "_", key)
             cpp_type = item.get("_cppType", "")
             if item["type"] == "boolean":
-                factory.append(f'    config.{key} = quantogral::parse_bool_value(values, "{key}", {"true" if item["default"] else "false"});')
+                factory.append(f'    config.{cpp_path} = quantogral::parse_bool_value(values, "{key}", {"true" if item["default"] else "false"});')
             elif item["type"] == "number":
                 parse_fn = "std::stod" if any(t in cpp_type for t in ("float", "double")) else "std::stoll"
-                factory.append(f'    config.{key} = static_cast<decltype(config.{key})>({parse_fn}(quantogral::value_or(values, "{key}", "{item["default"]}")));')
+                factory.append(f'    config.{cpp_path} = static_cast<decltype(config.{cpp_path})>({parse_fn}(quantogral::value_or(values, "{key}", "{item["default"]}")));')
             elif item["type"] == "text":
-                factory.append(f'    config.{key} = quantogral::value_or(values, "{key}", {json.dumps(item["default"])});')
+                factory.append(f'    config.{cpp_path} = quantogral::value_or(values, "{key}", {json.dumps(item["default"])});')
             else:
                 enum_type = cpp_type
-                factory.append(f'    const auto qg_{key} = quantogral::value_or(values, "{key}", "{item["default"]}");')
+                factory.append(f'    const auto qg_{safe_key} = quantogral::value_or(values, "{key}", "{item["default"]}");')
                 for option_index, option in enumerate(enums[enum_type.split("::")[-1]]):
                     branch = "if" if option_index == 0 else "else if"
-                    factory.append(f'    {branch} (qg_{key} == "{option}") config.{key} = {enum_type}::{option};')
-                factory.append(f'    else throw std::invalid_argument("Unsupported value for {key}: " + qg_{key});')
+                    factory.append(f'    {branch} (qg_{safe_key} == "{option}") config.{cpp_path} = {enum_type}::{option};')
+                factory.append(f'    else throw std::invalid_argument("Unsupported value for {key}: " + qg_{safe_key});')
         factory.extend([f'    return std::make_unique<{class_name}>(config, quantogral::make_base_config(values));', "}"])
         output.extend(factory)
         output.append(f'namespace {{ const bool qg_registered_{safe_id} = [] {{ quantogral::register_strategy({{"{identifier}", &qg_create_{safe_id}}}); return true; }}(); }}')
@@ -954,6 +983,38 @@ def prepare_market_feed_csv(
     return len(converted_rows)
 
 
+def read_trade_chart(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a small, scrollable OHLC window for a trade in a local data file."""
+    relative_path = payload.get("path")
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ValueError("The trade has no linked data file.")
+    source = safe_workspace_path(PROJECT_ROOT / "data", relative_path)
+    if not source.is_file() or source.suffix.lower() not in {".csv", ".parquet", ".pq"}:
+        raise ValueError("The linked market-data file could not be found.")
+    timezone_name = payload.get("timezone", "UTC")
+    ts_unit = payload.get("tsUnit", "MILLISECONDS")
+    date_format = payload.get("dateFormat", "DDMMYYYY")
+    if ts_unit not in {"SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"} or date_format not in {"DDMMYYYY", "MMDDYYYY"}:
+        raise ValueError("The linked data file has unsupported timestamp settings.")
+    try:
+        rows = _read_ohlcv_frame(source).rows()
+        points = []
+        for row_number, row in enumerate(rows, 1):
+            try:
+                timestamp = _market_timestamp_ms(row[0], timezone_name, ts_unit, date_format)
+                ohlc = [float(value) for value in row[1:5]]
+            except (TypeError, ValueError, IndexError) as error:
+                raise ValueError(f"Could not read chart data at row {row_number}: {error}") from error
+            if all(math.isfinite(value) for value in ohlc):
+                points.append({"timestamp": timestamp, "open": ohlc[0], "high": ohlc[1], "low": ohlc[2], "close": ohlc[3]})
+    except ImportError as error:
+        raise RuntimeError(str(error)) from error
+    points.sort(key=lambda point: point["timestamp"])
+    if not points:
+        raise ValueError("The linked market-data file has no usable OHLC rows.")
+    return {"points": points, "totalPoints": len(points)}
+
+
 def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     if not runner_is_current():
         raise RuntimeError("Compile the strategies from Builder settings before running a backtest.")
@@ -1066,7 +1127,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                     fx_cache=fx_rate_cache,
                 )
                 arguments.extend([feed_id, str(runner_data_path), "MILLISECONDS", "DDMMYYYY"])
-                prepared_feeds.append({"id": feed_id, "path": str(data_path), "name": data_path.name, "tsUnit": ts_unit, "dateFormat": date_format, "currency": asset_currency, "timezone": metadata["timezone"]})
+                prepared_feeds.append({"id": feed_id, "path": relative_path, "name": data_path.name, "tsUnit": ts_unit, "dateFormat": date_format, "currency": asset_currency, "timezone": metadata["timezone"]})
 
             arguments.append(str(len(strategies)))
             prepared_strategies = []
@@ -1127,6 +1188,11 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     def process_scenario(output: dict[str, Any]) -> dict[str, Any]:
         output_buckets = output.get("buckets", [])
         orders = []
+        instrument_by_feed = {
+            feed["id"]: Path(feed["name"]).stem.split("_", 1)[0]
+            for bucket in prepared_buckets
+            for feed in bucket["feeds"]
+        }
         for bucket_index, bucket in enumerate(output_buckets):
             bucket["feeds"] = prepared_buckets[bucket_index]["feeds"]
             strategy_metadata = {item["instanceId"]: item for item in prepared_buckets[bucket_index]["strategies"]}
@@ -1134,8 +1200,12 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 metadata = strategy_metadata[strategy["instanceId"]]
                 strategy["strategyId"] = metadata["strategyId"]
                 strategy["name"] = metadata["name"]
+                strategy["strategyTag"] = f'{metadata["name"]}#{strategy.get("engineId", strategy["instanceId"])}'
+                for indicator in strategy.get("indicators", []):
+                    indicator["instanceId"] = strategy["instanceId"]
+                    indicator["strategyName"] = metadata["name"]
                 for order in strategy.get("orders", []):
-                    orders.append({**order, "bucketId": bucket["id"], "instanceId": strategy["instanceId"], "strategyId": strategy["strategyId"], "strategyName": strategy["name"]})
+                    orders.append({**order, "bucketId": bucket["id"], "instanceId": strategy["instanceId"], "strategyId": strategy["strategyId"], "strategyName": strategy["name"], "strategyTag": strategy["strategyTag"]})
             bucket["metrics"] = {"orders": sum(len(strategy.get("orders", [])) for strategy in bucket.get("strategies", []))}
         output["inputRows"] = int(output.get("inputRows", 0))
         output["buckets"] = output_buckets
@@ -1149,8 +1219,8 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             parent_id = int(order.get("parentId", -1))
             order_key = (order["bucketId"], order["instanceId"], parent_id)
             signal = order.get("signal")
-            if parent_id < 0 and signal in {"LONG", "SHORT", "BUY", "SELL"}:
-                side = "LONG" if signal in {"LONG", "BUY"} else "SHORT"
+            if parent_id < 0 and signal in {"LONG", "SHORT", "BLONG", "BSHORT", "BUY", "SELL"}:
+                side = "LONG" if signal in {"LONG", "BLONG", "BUY"} else "SHORT"
                 entries[(order["bucketId"], order["instanceId"], int(order["id"]))] = {**order, "side": side}
                 continue
             entry = entries.get(order_key)
@@ -1175,7 +1245,8 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             risk_amount = min(stop_distances) * quantity * entry_rate if stop_distances else 0.0
             closed_trades.append({
                 "bucketId": order["bucketId"], "instanceId": order["instanceId"],
-                "strategyName": order["strategyName"], "feedId": order.get("feedId", ""),
+                "strategyName": order["strategyName"], "strategyTag": order["strategyTag"], "feedId": order.get("feedId", ""),
+                "instrument": instrument_by_feed.get(order.get("feedId", ""), ""),
                 "side": entry["side"], "entryTimestamp": entry["timestamp"], "exitTimestamp": order["timestamp"],
                 "quantity": quantity, "entryPrice": entry_price, "exitPrice": exit_price,
                 "profit": net_profit, "riskReward": net_profit / risk_amount if risk_amount > 0 else None,
@@ -1386,6 +1457,19 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 self.send_json(dataset_settings(relative_path))
             except WorkspaceItemError as error:
                 self.send_json({"error": str(error)}, error.status)
+            return
+
+        if parsed_path.path == "/api/backtests/trade-chart":
+            query = parse_qs(parsed_path.query)
+            payload = {key: values[0] for key, values in query.items() if values}
+            try:
+                self.send_json(read_trade_chart(payload))
+            except WorkspaceItemError as error:
+                self.send_json({"error": str(error)}, error.status)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            except RuntimeError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if parsed_path.path == "/api/strategies/presets":

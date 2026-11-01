@@ -9,8 +9,41 @@
 #include <string_view>
 #include <iostream>
 #include <cmath>
+#include <string>
+#include <string_view>
 
 #include "core/market_events.hpp"
+
+namespace quantogral::detail {
+using IndicatorTraceCallback = void (*)(const void*, std::string_view, double, void*);
+inline thread_local IndicatorTraceCallback active_indicator_trace_callback = nullptr;
+inline thread_local void* active_indicator_trace_context = nullptr;
+
+class IndicatorTraceScope {
+public:
+    IndicatorTraceScope(IndicatorTraceCallback callback, void* context)
+        : previous_callback_(active_indicator_trace_callback), previous_context_(active_indicator_trace_context) {
+        active_indicator_trace_callback = callback;
+        active_indicator_trace_context = context;
+    }
+    ~IndicatorTraceScope() {
+        active_indicator_trace_callback = previous_callback_;
+        active_indicator_trace_context = previous_context_;
+    }
+    IndicatorTraceScope(const IndicatorTraceScope&) = delete;
+    IndicatorTraceScope& operator=(const IndicatorTraceScope&) = delete;
+
+private:
+    IndicatorTraceCallback previous_callback_;
+    void* previous_context_;
+};
+
+inline void record_indicator_value(const void* source, std::string_view name, double value) {
+    if (active_indicator_trace_callback) {
+        active_indicator_trace_callback(source, name, value, active_indicator_trace_context);
+    }
+}
+} // namespace quantogral::detail
 
 
 
@@ -21,12 +54,15 @@ public:
 
     // returns new indicator value
     std::optional<Tout> update(const Tin& input) {
-        return derived().compute(input);
+        auto value = derived().compute(input);
+        record_trace(value);
+        return value;
     }
 
     // computes new ind value and updates buffer
     void update_buffer(const Tin& input) {
         auto value = derived().compute(input);
+        record_trace(value);
 
         // if no max size push always not limit
         if (max_buffer_size < 0) {
@@ -108,6 +144,26 @@ protected:
 private:
     int max_buffer_size = 0;
     std::size_t next_buffer_idx = 0;
+
+    std::string trace_name() const {
+        std::string label = "Indicator";
+        if constexpr (requires { Derived::trace_type_name; }) {
+            label = std::string(Derived::trace_type_name);
+        }
+        if constexpr (requires(const Derived& value) { value.get_len(); }) {
+            label += " (" + std::to_string(derived().get_len()) + ")";
+        }
+        return label;
+    }
+
+    void record_trace(const std::optional<Tout>& value) const {
+        if constexpr (std::is_arithmetic_v<Tout>) {
+            if (value && std::isfinite(static_cast<double>(*value))) {
+                const auto label = trace_name();
+                quantogral::detail::record_indicator_value(this, label, static_cast<double>(*value));
+            }
+        }
+    }
 
     // finds the actual idx in the vector if a max size was triggered (contiguous storage not in order anymore)
     std::size_t physical_idx(std::size_t logical_idx) const {

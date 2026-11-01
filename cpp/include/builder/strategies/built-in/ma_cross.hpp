@@ -18,9 +18,7 @@ struct MACConfig {
     PRICE_FIELD slow_price_field = PRICE_FIELD::CLOSE;
     double slnot = -1.0;
     double slpct = -1.0;
-    SIZING_MODE pos_sizing_mode = SIZING_MODE::FIXED;
-    double qty = 1.0;
-    double equity_pct = 0.05;
+    SizingConfig sizing = {};
 };
 class MAC : public Strategy<OHLCVEvent> {
 public:
@@ -34,7 +32,7 @@ public:
         if (params.fast_len >= params.slow_len || params.fast_len < 1 || params.slow_len < 1) {
             throw std::invalid_argument("lengths must be positive. fast length must be < slow length");
         }
-        if (params.equity_pct <= 0.0 || params.equity_pct > 1.0) {
+        if (params.sizing.equity_pct <= 0.0 || params.sizing.equity_pct > 1.0) {
             throw std::invalid_argument("MAC equity_pct must be in (0, 1]");
         }
     }
@@ -54,7 +52,7 @@ public:
             if (!this->bconfig.stacking && ctx.opos > 0.0) return;
             const double target_qty = calculate_qty(ctx, input.close);
             const double buy_qty = ctx.opos < 0.0 ? target_qty - ctx.opos : target_qty;
-            out.push_back({.signal = SIGNAL::BBUY, .type = ORDER_TYPE::MARKET, .qty = buy_qty,
+            out.push_back({.signal = SIGNAL::BLONG, .type = ORDER_TYPE::MARKET, .qty = buy_qty,
                            .sl = StopLoss{.type = STOP_TYPE::HARD, .slnot = params.slnot, .slpct = params.slpct}});
         }
 
@@ -62,22 +60,22 @@ public:
             if (!this->bconfig.stacking && ctx.opos < 0.0) return;
             const double target_qty = calculate_qty(ctx, input.close);
             const double sell_qty = ctx.opos > 0.0 ? target_qty + ctx.opos : target_qty;
-            out.push_back({.signal = SIGNAL::BSELL, .type = ORDER_TYPE::MARKET, .qty = sell_qty,
+            out.push_back({.signal = SIGNAL::BSHORT, .type = ORDER_TYPE::MARKET, .qty = sell_qty,
                            .sl = StopLoss{.type = STOP_TYPE::HARD, .slnot = params.slnot, .slpct = params.slpct}});
         }
     }
 
     double calculate_qty(const StrategyContext& ctx, double price) const {
-        switch (params.pos_sizing_mode) {
+        switch (params.sizing.mode) {
             case SIZING_MODE::FIXED:
-                return 11;
+                return params.sizing.qty;
             case SIZING_MODE::FIXED_FRACTIONAL_PRICE:
-                return ctx.fixed_fractional_price_qty(price, params.equity_pct);
+                return ctx.fixed_fractional_price_qty(price, params.sizing.equity_pct);
             case SIZING_MODE::FIXED_FRACTIONAL_SL:
                 if (!(params.slnot > 0.0)) {
                     throw std::invalid_argument("MAC fixed-fractional-SL sizing requires a positive slnot.");
                 }
-                return ctx.fixed_fractional_sl_qty(params.slnot, params.equity_pct);
+                return ctx.fixed_fractional_sl_qty(params.slnot, params.sizing.equity_pct);
             default:
                 throw std::invalid_argument("MAC unsupported sizing mode");
         }

@@ -3,6 +3,7 @@ import './App.css'
 
 const DEFAULT_BUILDER_PATH = './cpp/include/builder'
 const BACKTEST_SETTINGS_KEY = 'quantogral.simpleBacktest.settings'
+const TRADE_INDICATOR_STYLES_KEY = 'quantogral.tradeChart.indicatorStyles'
 const EXPLORER_SETTINGS_KEY = 'quantogral.projectExplorer.settings'
 const SITE_THEME_KEY = 'quantogral.siteTheme'
 const SIDEBAR_MIN_WIDTH = 220
@@ -18,6 +19,14 @@ const CURRENCY_OPTIONS = (() => {
   return codes.filter((code) => /^[A-Z]{3}$/.test(code)).map((value) => ({ value, label: `${value} · ${names.of(value) || value}` }))
     .sort((left, right) => left.value === 'USD' ? -1 : right.value === 'USD' ? 1 : left.value.localeCompare(right.value))
 })()
+
+function loadTradeIndicatorStyles() {
+  try {
+    return JSON.parse(window.localStorage.getItem(TRADE_INDICATOR_STYLES_KEY) || '{}') || {}
+  } catch {
+    return {}
+  }
+}
 
 function SearchableSelect({ value, options, onChange, placeholder = 'Search…', ariaLabel }) {
   const [open, setOpen] = useState(false)
@@ -315,6 +324,19 @@ function ConfigField({ field, value, onChange }) {
   )
 }
 
+function StrategyParameterFields({ fields, values, onChange }) {
+  const groups = new Map()
+  for (const field of fields) {
+    if (field.visibleWhen) {
+      const selected = values[field.visibleWhen.key]
+      if (!field.visibleWhen.values.includes(selected)) continue
+    }
+    const group = field.group || ''
+    groups.set(group, [...(groups.get(group) || []), field])
+  }
+  return <div className="strategy-parameter-groups">{[...groups.entries()].map(([group, groupFields]) => <section className="strategy-parameter-group" key={group || 'general'}>{group && <h4>{group}</h4>}<div className="config-grid">{groupFields.map((field) => <ConfigField key={field.key} field={field} value={values[field.key]} onChange={onChange} />)}</div></section>)}</div>
+}
+
 function strategyDefaults(strategy) {
   return Object.fromEntries(strategy.parameters.map((field) => [field.key, field.default]))
 }
@@ -331,10 +353,12 @@ function presetIsStale(preset, strategy) {
 
 function reconcilePresetConfig(preset, strategy) {
   const result = {}
+  const legacyKeys = { 'sizing.mode': 'pos_sizing_mode', 'sizing.qty': 'qty', 'sizing.equity_pct': 'equity_pct' }
   for (const field of strategy.parameters) {
-    const savedSchema = preset.fields?.[field.key]
-    result[field.key] = (savedSchema === presetFieldSchema(field) || savedSchema === field.type) && Object.hasOwn(preset.config || {}, field.key)
-      ? preset.config[field.key]
+    const savedKey = Object.hasOwn(preset.config || {}, field.key) ? field.key : legacyKeys[field.key]
+    const savedSchema = preset.fields?.[savedKey]
+    result[field.key] = savedKey && (savedSchema === presetFieldSchema(field) || savedSchema === field.type) && Object.hasOwn(preset.config || {}, savedKey)
+      ? preset.config[savedKey]
       : field.default
   }
   return result
@@ -348,8 +372,18 @@ function PresetManagerDialog({ strategy, initialData, onPersist, onClose }) {
   const [config, setConfig] = useState(firstPreset ? reconcilePresetConfig(firstPreset, strategy) : strategyDefaults(strategy))
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [presetRowSettingsId, setPresetRowSettingsId] = useState(null)
+  const [unsavedPresetIds, setUnsavedPresetIds] = useState(() => new Set())
   const selected = data.presets.find((preset) => preset.id === selectedId)
+  const serializeConfig = (value) => JSON.stringify(Object.entries(value || {}).sort(([left], [right]) => left.localeCompare(right)))
+  const presetNeedsSave = Boolean(selected && (
+    unsavedPresetIds.has(selectedId) ||
+    selected.name !== name.trim() ||
+    serializeConfig(selected.config) !== serializeConfig(config) ||
+    presetIsStale(selected, strategy)
+  ))
   function createPreset() {
+    setPresetRowSettingsId(null)
     const id = globalThis.crypto?.randomUUID?.() || `preset-${Date.now()}`
     const preset = { id, name: 'New preset', config: strategyDefaults(strategy), fields: Object.fromEntries(strategy.parameters.map((field) => [field.key, presetFieldSchema(field)])) }
     const next = { ...data, presets: [...data.presets, preset], lastPresetId: id }
@@ -357,6 +391,7 @@ function PresetManagerDialog({ strategy, initialData, onPersist, onClose }) {
     setSelectedId(id)
     setName(preset.name)
     setConfig(preset.config)
+    setUnsavedPresetIds((current) => new Set(current).add(id))
   }
 
   async function savePreset() {
@@ -369,6 +404,11 @@ function PresetManagerDialog({ strategy, initialData, onPersist, onClose }) {
     try {
       const result = await onPersist(strategy.id, next)
       setData(result)
+      setUnsavedPresetIds((current) => {
+        const updatedIds = new Set(current)
+        updatedIds.delete(selectedId)
+        return updatedIds
+      })
     } catch (saveError) {
       setError(saveError.message)
     } finally {
@@ -376,15 +416,26 @@ function PresetManagerDialog({ strategy, initialData, onPersist, onClose }) {
     }
   }
 
-  async function removePreset() {
-    if (!selected) return
-    const remaining = data.presets.filter((preset) => preset.id !== selectedId)
+  async function removePreset(presetId = selectedId) {
+    if (!data.presets.some((preset) => preset.id === presetId)) return
+    setPresetRowSettingsId(null)
+    const remaining = data.presets.filter((preset) => preset.id !== presetId)
     const next = { presets: remaining, lastPresetId: remaining[0]?.id || null }
     setSaving(true)
     try {
       const result = await onPersist(strategy.id, next)
       setData(result)
-      setSelectedId(result.presets[0]?.id || '')
+      if (presetId === selectedId) {
+        const nextSelected = result.presets[0]
+        setSelectedId(nextSelected?.id || '')
+        setName(nextSelected?.name || '')
+        setConfig(nextSelected ? reconcilePresetConfig(nextSelected, strategy) : strategyDefaults(strategy))
+      }
+      setUnsavedPresetIds((current) => {
+        const updatedIds = new Set(current)
+        updatedIds.delete(presetId)
+        return updatedIds
+      })
     } catch (saveError) { setError(saveError.message) } finally { setSaving(false) }
   }
 
@@ -395,13 +446,13 @@ function PresetManagerDialog({ strategy, initialData, onPersist, onClose }) {
         <div className="eyebrow">CODE WORKSPACE · STRATEGY PRESETS</div>
         <h2 id="preset-manager-title">{strategy.name} presets</h2>
         <div className="preset-manager-layout">
-          <div className="preset-list">{data.presets.map((preset) => <button className={preset.id === selectedId ? 'is-selected' : ''} key={preset.id} onClick={() => { setSelectedId(preset.id); setName(preset.name); setConfig(reconcilePresetConfig(preset, strategy)) }} type="button">{preset.name}{presetIsStale(preset, strategy) && <small>STALE</small>}</button>)}<button className="preset-create-button" onClick={createPreset} type="button">+ New preset</button></div>
+          <div className="preset-list">{data.presets.map((preset) => <div className={`preset-list-row ${preset.id === selectedId ? 'is-selected' : ''}`} key={preset.id}><button className="preset-list-select" onClick={() => { setSelectedId(preset.id); setName(preset.name); setConfig(reconcilePresetConfig(preset, strategy)); setPresetRowSettingsId(null) }} type="button">{preset.name}{presetIsStale(preset, strategy) && <small>STALE</small>}</button><button aria-expanded={presetRowSettingsId === preset.id} aria-label={`${preset.name} settings`} className="item-settings preset-row-settings" onClick={() => setPresetRowSettingsId((current) => current === preset.id ? null : preset.id)} title={`${preset.name} settings`} type="button">⚙</button>{presetRowSettingsId === preset.id && <div className="preset-row-menu"><button className="danger-button" disabled={saving} onClick={() => removePreset(preset.id)} type="button">Delete preset</button></div>}</div>)}<button className="preset-create-button" onClick={createPreset} type="button">+ New preset</button></div>
           {selected ? <div className="preset-editor">
             <label className="config-field"><span>Preset name</span><input onChange={(event) => setName(event.target.value)} value={name} /></label>
             {presetIsStale(selected, strategy) && <p className="input-help">This preset has changed fields. Matching name and type values are preserved; new or changed fields use current defaults. Save to update it.</p>}
-            <div className="config-grid">{strategy.parameters.map((field) => <ConfigField key={field.key} field={field} value={config[field.key]} onChange={(key, value) => setConfig((current) => ({ ...current, [key]: value }))} />)}</div>
+            <StrategyParameterFields fields={strategy.parameters} onChange={(key, value) => setConfig((current) => ({ ...current, [key]: value }))} values={config} />
             {error && <p className="form-error">{error}</p>}
-            <div className="dialog-actions"><button className="danger-button" disabled={saving} onClick={removePreset} type="button">Delete preset</button><button className="primary-button" disabled={saving || !name.trim()} onClick={savePreset} type="button">{saving ? 'Saving…' : 'Save preset'}</button></div>
+            <div className="dialog-actions"><button className={`primary-button preset-save-button ${!presetNeedsSave && !saving ? 'is-saved' : ''}`} disabled={saving || !name.trim() || !presetNeedsSave} onClick={savePreset} type="button">{saving ? 'Saving…' : presetNeedsSave ? 'Save preset' : 'Saved'}</button></div>
           </div> : <p className="input-help">Create a preset to save a reusable configuration for this strategy.</p>}
         </div>
       </section>
@@ -595,14 +646,258 @@ function reportTimestamp(timestamp) {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
 }
 
+function TradeVisualizer({ seriesOptions, onClose, focusedTrade }) {
+  const focusedSeriesKey = focusedTrade ? `${focusedTrade.bucketId}:${focusedTrade.feedId}` : ''
+  const [selectedSeriesKey, setSelectedSeriesKey] = useState(focusedSeriesKey || seriesOptions[0]?.key || '')
+  const [chart, setChart] = useState(null)
+  const selectedSeries = seriesOptions.find((series) => series.key === selectedSeriesKey) || seriesOptions[0]
+  const feed = selectedSeries?.feed
+  const trades = useMemo(() => selectedSeries?.trades || [], [selectedSeries])
+  const indicators = useMemo(() => selectedSeries?.indicators || [], [selectedSeries])
+  const [hiddenIndicators, setHiddenIndicators] = useState({})
+  const [savedIndicatorStyles, setSavedIndicatorStyles] = useState(loadTradeIndicatorStyles)
+  const [indicatorStyles, setIndicatorStyles] = useState(loadTradeIndicatorStyles)
+  const [indicatorSettingsKey, setIndicatorSettingsKey] = useState(null)
+  const [savedIndicatorKey, setSavedIndicatorKey] = useState(null)
+  const chartWrapRef = useRef(null)
+  const [viewportStartIndex, setViewportStartIndex] = useState(0)
+  const [viewportPointCount, setViewportPointCount] = useState(210)
+  const [viewportWidth, setViewportWidth] = useState(1000)
+  const [chartError, setChartError] = useState(feed?.path ? '' : 'The market-data file for this series is unavailable.')
+  const [loading, setLoading] = useState(Boolean(feed?.path))
+  const [chartHover, setChartHover] = useState(null)
+  useEffect(() => {
+    if (!savedIndicatorKey) return undefined
+    const timeout = window.setTimeout(() => setSavedIndicatorKey(null), 900)
+    return () => window.clearTimeout(timeout)
+  }, [savedIndicatorKey])
+  const loadSeries = useCallback(async () => {
+    if (!feed?.path) return
+    try {
+      const query = new URLSearchParams({ path: feed.path, timezone: feed.timezone || 'UTC', tsUnit: feed.tsUnit || 'MILLISECONDS', dateFormat: feed.dateFormat || 'DDMMYYYY' })
+      const response = await fetch(`/api/backtests/trade-chart?${query}`)
+      const result = await readApiJson(response, 'trade chart')
+      if (!response.ok) throw new Error(result.error || 'Could not load trade chart.')
+      setChart(result)
+    } catch (error) {
+      setChartError(error.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [feed])
+  useEffect(() => {
+    const hasValues = trades.length > 0 || indicators.some((indicator) => indicator.points?.length)
+    if (!hasValues) return undefined
+    const timeoutId = window.setTimeout(() => loadSeries(), 0)
+    return () => window.clearTimeout(timeoutId)
+  }, [loadSeries, trades, indicators])
+  const points = useMemo(() => chart?.points || [], [chart])
+  const height = 430
+  const plot = { left: 70, right: 18, top: 22, bottom: 42 }
+  const width = Math.max(700, viewportWidth)
+  const fullWidth = Math.max(width, points.length * 5 + plot.left + plot.right)
+  const plotWidth = width - plot.left - plot.right
+  const plotHeight = height - plot.top - plot.bottom
+  const step = 5
+  useEffect(() => {
+    const element = chartWrapRef.current
+    if (!element || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver((entries) => {
+      const contentWidth = entries[0]?.contentRect.width || element.clientWidth
+      setViewportWidth(contentWidth)
+      setViewportPointCount(Math.max(80, Math.ceil((contentWidth - plot.left - plot.right) / step) + 4))
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [chart, plot.left, plot.right, step])
+
+  const viewportEndIndex = Math.min(points.length, viewportStartIndex + viewportPointCount)
+  const viewportPoints = points.slice(viewportStartIndex, viewportEndIndex)
+  const viewportStartTimestamp = viewportPoints[0]?.timestamp ?? Infinity
+  const viewportEndTimestamp = viewportPoints.at(-1)?.timestamp ?? -Infinity
+  const visibleTrades = trades.filter((trade) => trade.exitTimestamp >= viewportStartTimestamp && trade.entryTimestamp <= viewportEndTimestamp)
+  const visibleFillPrices = visibleTrades.flatMap((trade) => [
+    trade.entryTimestamp >= viewportStartTimestamp && trade.entryTimestamp <= viewportEndTimestamp ? trade.entryPrice : null,
+    trade.exitTimestamp >= viewportStartTimestamp && trade.exitTimestamp <= viewportEndTimestamp ? trade.exitPrice : null,
+  ])
+  const visibleTracePrices = visibleTrades.flatMap((trade) => {
+    if (trade.exitTimestamp <= trade.entryTimestamp) return []
+    const start = Math.max(trade.entryTimestamp, viewportStartTimestamp)
+    const end = Math.min(trade.exitTimestamp, viewportEndTimestamp)
+    const priceAt = (timestamp) => trade.entryPrice + (trade.exitPrice - trade.entryPrice) * ((timestamp - trade.entryTimestamp) / (trade.exitTimestamp - trade.entryTimestamp))
+    return end >= start ? [priceAt(start), priceAt(end)] : []
+  })
+  const visibleIndicators = indicators.filter((indicator) => hiddenIndicators[indicator.key] === true)
+  const prices = viewportPoints.flatMap((point) => [point.high, point.low]).concat(visibleFillPrices, visibleTracePrices).filter(Number.isFinite)
+  const minimum = prices.length ? Math.min(...prices) : 0
+  const maximum = prices.length ? Math.max(...prices) : 1
+  const padding = (maximum - minimum || Math.abs(maximum) * 0.01 || 1) * 0.08
+  const yFor = (price) => plot.top + ((maximum + padding - price) / (maximum - minimum + padding * 2 || 1)) * plotHeight
+  const xForIndex = (index) => plot.left + (index - viewportStartIndex) * step
+  const lowerBoundTimestamp = (timestamp) => {
+    let low = 0
+    let high = points.length
+    while (low < high) {
+      const middle = (low + high) >> 1
+      if (points[middle].timestamp < timestamp) low = middle + 1
+      else high = middle
+    }
+    return low
+  }
+  const indexForTimestamp = (timestamp) => {
+    const low = lowerBoundTimestamp(timestamp)
+    if (low >= points.length) return points.length - 1
+    if (low > 0 && timestamp - points[low - 1].timestamp < points[low].timestamp - timestamp) return low - 1
+    return low
+  }
+  const fillIndex = (timestamp) => points.length && timestamp >= points[0].timestamp && timestamp <= points.at(-1).timestamp ? indexForTimestamp(timestamp) : -1
+  const xForTimestamp = (timestamp) => {
+    if (!points.length) return plot.left
+    if (points.length === 1) return plot.left + plotWidth / 2
+    const rightIndex = lowerBoundTimestamp(timestamp)
+    if (rightIndex === 0) {
+      const interval = points[1].timestamp - points[0].timestamp || 1
+      return xForIndex((timestamp - points[0].timestamp) / interval)
+    }
+    if (rightIndex >= points.length) {
+      const previousIndex = points.length - 2
+      const interval = points.at(-1).timestamp - points[previousIndex].timestamp || 1
+      return xForIndex(points.length - 1 + (timestamp - points.at(-1).timestamp) / interval)
+    }
+    const leftIndex = rightIndex - 1
+    const leftPoint = points[leftIndex]
+    const rightPoint = points[rightIndex]
+    const ratio = rightPoint.timestamp === leftPoint.timestamp ? 0 : (timestamp - leftPoint.timestamp) / (rightPoint.timestamp - leftPoint.timestamp)
+    return xForIndex(leftIndex + ratio)
+  }
+  const scrollToTimestamp = (timestamp) => {
+    if (!chartWrapRef.current || !points.length) return
+    const targetX = (indexForTimestamp(timestamp) * step) + plot.left
+    chartWrapRef.current.scrollTo({ left: Math.max(0, targetX - chartWrapRef.current.clientWidth / 2), behavior: 'smooth' })
+  }
+  useEffect(() => {
+    if (!chart || !focusedTrade || selectedSeriesKey !== focusedSeriesKey) return undefined
+    let low = 0
+    let high = points.length
+    while (low < high) {
+      const middle = (low + high) >> 1
+      if (points[middle].timestamp < focusedTrade.entryTimestamp) low = middle + 1
+      else high = middle
+    }
+    const pointIndex = Math.max(0, Math.min(points.length - 1, low))
+    const frame = window.requestAnimationFrame(() => chartWrapRef.current?.scrollTo({ left: Math.max(0, pointIndex * step + plot.left - chartWrapRef.current.clientWidth / 2), behavior: 'smooth' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [chart, focusedTrade, focusedSeriesKey, selectedSeriesKey, points, step, plot.left])
+  const fillEvents = visibleTrades.flatMap((trade) => [
+    { trade, timestamp: trade.entryTimestamp, price: trade.entryPrice, action: trade.side === 'LONG' ? 'BUY' : 'SELL', orderName: trade.side === 'LONG' ? 'BLONG' : 'BSHORT', label: 'Entry' },
+    { trade, timestamp: trade.exitTimestamp, price: trade.exitPrice, action: trade.side === 'LONG' ? 'SELL' : 'BUY', orderName: trade.side === 'LONG' ? 'SELL' : 'COVER', label: 'Exit' },
+  ]).map((event) => ({ ...event, candleIndex: fillIndex(event.timestamp) })).filter((event) => event.candleIndex >= 0 && event.timestamp >= viewportStartTimestamp && event.timestamp <= viewportEndTimestamp)
+  const dateLabel = (timestamp) => new Date(timestamp).toLocaleDateString(undefined, { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'UTC' })
+  const visibleStart = points[0]?.timestamp
+  const visibleEnd = points.at(-1)?.timestamp
+
+  return <section aria-label="Trade series visualizer" className="trade-visualizer">
+    <div className="trade-visualizer-heading"><div><span className="eyebrow">TRADE SERIES</span><h3>{selectedSeries?.label || 'Trades'} · {trades.length} trades</h3><p>Every entry and exit on this data feed is marked on the same OHLC timeline.</p></div><button aria-label="Close trade visualizer" className="secondary-button" onClick={onClose} type="button">Back to trades</button></div>
+      <div className="trade-visualizer-toolbar"><label>Data series <select aria-label="Data series" onChange={(event) => { setSelectedSeriesKey(event.target.value); setChart(null); setViewportStartIndex(0); setChartHover(null); setLoading(true); setChartError('') }} value={selectedSeries?.key || ''}>{seriesOptions.map((series) => <option key={series.key} value={series.key}>{series.label} · {series.trades.length} trades</option>)}</select></label><div><button className="secondary-button" disabled={loading || !trades.length} onClick={() => scrollToTimestamp(trades[0].entryTimestamp)} type="button">First trade</button><button className="secondary-button" disabled={loading || !trades.length} onClick={() => scrollToTimestamp(trades.at(-1).exitTimestamp)} type="button">Last trade</button></div><span>{loading ? 'Loading full series…' : chart ? `${chart.totalPoints.toLocaleString()} candles · ${dateLabel(visibleStart)} — ${dateLabel(visibleEnd)} UTC · scroll horizontally; price scale follows view` : ''}</span></div>
+    {indicators.length > 0 && <div aria-label="Indicator visibility" className="trade-indicator-controls"><strong>Indicators</strong>{indicators.map((indicator) => {
+      const styleKey = indicator.preferenceKey || indicator.key
+      const defaultStyle = { width: 1, alpha: 0.8, dash: 'solid' }
+      const lineStyle = indicatorStyles[styleKey] || defaultStyle
+      const savedStyle = savedIndicatorStyles[styleKey] || defaultStyle
+      const styleNeedsSave = JSON.stringify(lineStyle) !== JSON.stringify(savedStyle)
+      const isVisible = hiddenIndicators[indicator.key] === true
+      const updateLineStyle = (changes) => {
+        setSavedIndicatorKey(null)
+        setIndicatorStyles((current) => ({ ...current, [styleKey]: { ...(current[styleKey] || defaultStyle), ...changes } }))
+      }
+      const saveLineStyle = () => {
+        const updated = { ...savedIndicatorStyles, [styleKey]: lineStyle }
+        setSavedIndicatorStyles(updated)
+        setIndicatorStyles(updated)
+        setSavedIndicatorKey(indicator.key)
+        try { window.localStorage.setItem(TRADE_INDICATOR_STYLES_KEY, JSON.stringify(updated)) } catch { /* Browser storage may be unavailable. */ }
+      }
+      return <div className={`trade-indicator-control ${isVisible ? '' : 'is-hidden'}`} key={indicator.key} style={{ '--indicator-color': indicator.color }}>
+        <button aria-pressed={isVisible} className="trade-indicator-toggle" onClick={() => setHiddenIndicators((current) => ({ ...current, [indicator.key]: current[indicator.key] !== true }))} title={`${isVisible ? 'Hide' : 'Show'} ${indicator.label}`} type="button"><span aria-hidden="true">{isVisible ? '◉' : '○'}</span>{indicator.label}</button>
+        <button aria-expanded={indicatorSettingsKey === indicator.key} aria-label={`${indicator.label} line settings`} className="trade-indicator-cog" onClick={() => setIndicatorSettingsKey((current) => current === indicator.key ? null : indicator.key)} title={`${indicator.label} line settings`} type="button">⚙</button>
+        {indicatorSettingsKey === indicator.key && <div className="trade-indicator-settings" onClick={(event) => event.stopPropagation()}>
+          <div className="trade-indicator-settings-heading"><strong>Line style</strong><button aria-label="Close indicator line settings" onClick={() => setIndicatorSettingsKey(null)} type="button">×</button></div>
+          <label>Line width <span>{lineStyle.width}px</span><input max="5" min="0.5" onChange={(event) => updateLineStyle({ width: Number(event.target.value) })} step="0.25" type="range" value={lineStyle.width} /></label>
+          <label>Opacity <span>{Math.round(lineStyle.alpha * 100)}%</span><input max="1" min="0.1" onChange={(event) => updateLineStyle({ alpha: Number(event.target.value) })} step="0.05" type="range" value={lineStyle.alpha} /></label>
+          <label>Line style<select onChange={(event) => updateLineStyle({ dash: event.target.value })} value={lineStyle.dash}><option value="solid">Solid</option><option value="dashed">Dashed</option></select></label>
+          {(styleNeedsSave || savedIndicatorKey === indicator.key) && <button className={`trade-indicator-save-style ${savedIndicatorKey === indicator.key ? 'is-saved' : ''}`} disabled={savedIndicatorKey === indicator.key} onClick={saveLineStyle} type="button">{savedIndicatorKey === indicator.key ? 'Saved' : 'Save style'}</button>}
+        </div>}
+      </div>
+    })}</div>}
+    {chartError && <p className="form-error">{chartError}</p>}
+    {points.length > 0 && <div className="trade-chart-wrap" onScroll={(event) => {
+      const rawIndex = Math.floor(Math.max(0, event.currentTarget.scrollLeft - plot.left) / Math.max(step, 1))
+      const nextStart = Math.max(0, Math.min(points.length - 1, rawIndex))
+      setViewportStartIndex((current) => current === nextStart ? current : nextStart)
+    }} ref={chartWrapRef}><div className="trade-chart-spacer" style={{ width: `${fullWidth}px` }}><svg aria-label="OHLC candles with trade entry and exit" className="trade-chart" onPointerMove={(event) => {
+      const rect = event.currentTarget.getBoundingClientRect()
+      const svgX = (event.clientX - rect.left) * width / rect.width
+      const svgY = (event.clientY - rect.top) * height / rect.height
+      if (svgX < plot.left || svgX > width - plot.right || svgY < plot.top || svgY > height - plot.bottom) {
+        setChartHover(null)
+        return
+      }
+      const index = Math.max(0, Math.min(points.length - 1, viewportStartIndex + Math.round((svgX - plot.left) / (step || 1))))
+      const price = maximum + padding - ((svgY - plot.top) / plotHeight) * (maximum - minimum + padding * 2 || 1)
+      setChartHover({ index, x: svgX, y: svgY, price })
+    }} role="img" style={{ width: `${width}px` }} viewBox={`0 0 ${width} ${height}`}>
+      <defs><clipPath id="trade-series-plot-clip"><rect height={plotHeight} width={plotWidth} x={plot.left} y={plot.top} /></clipPath></defs>
+      {[0, 1, 2, 3].map((index) => { const y = plot.top + plotHeight * index / 3; const price = maximum + padding - (maximum - minimum + padding * 2) * index / 3; return <g key={index}><line className="trade-chart-grid" x1={plot.left} x2={width - plot.right} y1={y} y2={y} /><text x={plot.left - 9} y={y + 4} textAnchor="end">{reportNumber(price)}</text></g> })}
+      <text className="trade-chart-axis-title" transform={`translate(13 ${plot.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">Price</text>
+      {viewportPoints.map((point, localIndex) => { const index = viewportStartIndex + localIndex; const x = xForIndex(index); const candleWidth = Math.max(1, Math.min(6, step * 0.68)); const rising = point.close >= point.open; const color = rising ? '#56c596' : '#e36f76'; const bodyTop = Math.min(yFor(point.open), yFor(point.close)); const bodyHeight = Math.max(1, Math.abs(yFor(point.open) - yFor(point.close))); return <g key={point.timestamp}><title>{`${reportTimestamp(point.timestamp)} · O ${reportNumber(point.open)} H ${reportNumber(point.high)} L ${reportNumber(point.low)} C ${reportNumber(point.close)}`}</title><line stroke={color} strokeWidth="1" x1={x} x2={x} y1={yFor(point.high)} y2={yFor(point.low)} /><rect fill={color} height={bodyHeight} width={candleWidth} x={x - candleWidth / 2} y={bodyTop} /></g> })}
+      {visibleIndicators.map((indicator) => { const indicatorPoints = (indicator.points || []).filter((point) => point.timestamp >= viewportStartTimestamp && point.timestamp <= viewportEndTimestamp); const coordinates = indicatorPoints.map((point) => `${xForTimestamp(point.timestamp)},${yFor(point.value)}`).join(' '); const lineStyle = indicatorStyles[indicator.preferenceKey || indicator.key] || { width: 1, alpha: 0.8, dash: 'solid' }; return coordinates ? <polyline className="trade-indicator-line" key={indicator.key} points={coordinates} style={{ '--indicator-color': indicator.color, '--indicator-width': lineStyle.width, '--indicator-opacity': lineStyle.alpha, '--indicator-dasharray': lineStyle.dash === 'dashed' ? '5 4' : 'none' }}><title>{indicator.label}</title></polyline> : null })}
+      <g clipPath="url(#trade-series-plot-clip)">{visibleTrades.map((trade, index) => { const isLoss = Number(trade.profit) < 0; const colorClass = isLoss ? 'is-losing' : 'is-winning'; return <g className={colorClass} key={`${trade.bucketId}-${trade.instanceId}-${trade.entryTimestamp}-${index}`}><title>{`${trade.instrument || 'Trade'} · ${trade.side} · ${trade.strategyTag || trade.strategyName} · ${reportMoney(trade.profit)}`}</title><line className="trade-connector" style={{ stroke: isLoss ? '#ec747b' : '#51b88c' }} x1={xForTimestamp(trade.entryTimestamp)} x2={xForTimestamp(trade.exitTimestamp)} y1={yFor(trade.entryPrice)} y2={yFor(trade.exitPrice)} /></g> })}</g>
+      <g clipPath="url(#trade-series-plot-clip)">{fillEvents.map((fill) => { const x = xForIndex(fill.candleIndex); const y = yFor(fill.price); const isBuy = fill.action === 'BUY'; const points = isBuy ? `${x},${y + 3} ${x - 5},${y + 12} ${x + 5},${y + 12}` : `${x},${y - 3} ${x - 5},${y - 12} ${x + 5},${y - 12}`; return <polygon aria-label={`${fill.orderName} ${fill.label} at ${reportNumber(fill.price)}`} className={isBuy ? 'trade-buy-arrow' : 'trade-sell-arrow'} key={`${fill.trade.bucketId}-${fill.trade.instanceId}-${fill.trade.entryTimestamp}-${fill.label}`} points={points}><title>{`${fill.orderName} ${fill.label} · ${reportNumber(fill.price)} · ${fill.trade.side} trade · P&L ${reportMoney(fill.trade.profit)}`}</title></polygon> })}</g>
+      {Array.from({ length: 6 }, (_, index) => { const pointIndex = Math.min(points.length - 1, viewportStartIndex + Math.round((Math.max(1, viewportEndIndex - viewportStartIndex) - 1) * index / 5)); const point = points[pointIndex]; return <text key={index} textAnchor={index === 0 ? 'start' : index === 5 ? 'end' : 'middle'} x={xForIndex(pointIndex)} y={height - 12}>{dateLabel(point.timestamp)}</text> })}
+    </svg></div></div>}
+    {points.length > 0 && <div aria-live="polite" className="trade-chart-readout">
+      {chartHover ? <><strong>{reportTimestamp(points[chartHover.index].timestamp)}</strong><span>O {reportNumber(points[chartHover.index].open)}</span><span>H {reportNumber(points[chartHover.index].high)}</span><span>L {reportNumber(points[chartHover.index].low)}</span><span>C {reportNumber(points[chartHover.index].close)}</span><span>Cursor {reportNumber(chartHover.price)}</span>{fillEvents.filter((fill) => fill.candleIndex === chartHover.index).slice(0, 2).map((fill) => <span className={`trade-chart-readout-order ${fill.action === 'BUY' ? 'trade-hover-buy' : 'trade-hover-sell'}`} key={fill.label + fill.trade.entryTimestamp}><b>{fill.orderName} {fill.label}</b> {reportNumber(fill.price)} · {fill.trade.strategyTag || fill.trade.strategyName} · P&amp;L {reportMoney(fill.trade.profit)}</span>)}</> : <span>Hover over a candle, entry, or exit to inspect OHLC and fill details.</span>}
+    </div>}
+    {points.length > 0 && visibleTrades.length === 0 && <p className="input-help">Scroll horizontally to the dates where this feed’s trades occurred.</p>}
+  </section>
+}
+
 function BacktestReport({ scenarios, compare }) {
   const [activeTab, setActiveTab] = useState('general')
   const [detailScenarioId, setDetailScenarioId] = useState(scenarios[0]?.scenarioId || 'both')
+  const [visualizeSeries, setVisualizeSeries] = useState(false)
+  const [activeMetricHelp, setActiveMetricHelp] = useState(null)
+  const metricHelpRef = useRef(null)
+  useEffect(() => {
+    if (!activeMetricHelp) return undefined
+    const closeOnOutsideClick = (event) => { if (!metricHelpRef.current?.contains(event.target)) setActiveMetricHelp(null) }
+    const closeOnEscape = (event) => { if (event.key === 'Escape') setActiveMetricHelp(null) }
+    document.addEventListener('pointerdown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => { document.removeEventListener('pointerdown', closeOnOutsideClick); document.removeEventListener('keydown', closeOnEscape) }
+  }, [activeMetricHelp])
   const detailScenario = scenarios.find((scenario) => scenario.scenarioId === detailScenarioId) || scenarios[0]
   const currency = detailScenario.metrics.currency || 'USD'
+  const indicatorColors = ['#a887ff', '#57b8ed', '#f1b654', '#ef7fab', '#52d1c3', '#a5c96b']
+  const tradeSeriesOptions = (detailScenario.buckets || []).flatMap((bucket) => (bucket.feeds || []).map((feed) => {
+    const trades = (detailScenario.trades || []).filter((trade) => trade.bucketId === bucket.id && trade.feedId === feed.id)
+    const indicators = (bucket.strategies || []).flatMap((strategy) => (strategy.indicators || []).filter((indicator) => indicator.feedId === feed.id).map((indicator, index) => ({
+      key: `${bucket.id}:${strategy.instanceId}:${indicator.name}:${index}`,
+      preferenceKey: `${strategy.strategyId || strategy.name}:${indicator.name}:${index}`,
+      label: `${strategy.name} · ${indicator.name}`,
+      color: indicatorColors[index % indicatorColors.length],
+      points: indicator.points || [],
+    })))
+    return { key: `${bucket.id}:${feed.id}`, label: `${feed.name} · ${bucket.id}`, feed, trades, indicators }
+  })).filter((series) => series.trades.length > 0 || series.indicators.length > 0)
   const tabs = [
     ['general', 'General Report'], ['performance', 'Performance'], ['trades', 'Trades'], ['orders', 'Order Log'],
   ]
+  const metricLabel = (scenario, label, explanation) => {
+    const key = `${scenario.scenarioId}:${label}`
+    const isOpen = activeMetricHelp === key
+    return <div className="report-metric-label" ref={isOpen ? metricHelpRef : null}><span>{label}</span><button aria-expanded={isOpen} aria-label={`Explain ${label}`} className="metric-help-button" onClick={() => setActiveMetricHelp((current) => current === key ? null : key)} type="button">?</button>{isOpen && <div className="metric-help-popover" role="dialog"><button aria-label="Close explanation" className="metric-help-close" onClick={() => setActiveMetricHelp(null)} type="button">×</button><p>{explanation}</p></div>}</div>
+  }
   const scenarioMetricCards = (kind) => scenarios.map((scenario) => (
     <article className="report-scenario-card" key={scenario.scenarioId}>
       <h3>{scenario.scenarioLabel}</h3>
@@ -614,18 +909,18 @@ function BacktestReport({ scenarios, compare }) {
           <div><span>Average profit / trade</span><strong>{reportMoney(scenario.metrics.averageProfitPerTrade, currency)}</strong></div>
           <div><span>Trades / year</span><strong>{reportNumber(scenario.metrics.tradesPerYear)}</strong></div>
         </> : <>
-          <div><span>Profit notional</span><strong>{reportMoney(scenario.metrics.profitNotional, currency)}</strong></div>
-          <div><span>Profit</span><strong>{reportNumber(scenario.metrics.profitPct, '%')}</strong></div>
-          <div><span>Maximum drawdown</span><strong>{reportMoney(scenario.metrics.maxDrawdownDollars, currency)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
-          <div><span>CAGR</span><strong>{reportNumber(scenario.metrics.cagrPct, '%', 4)}</strong></div>
-          <div><span>Win ratio</span><strong>{reportNumber(scenario.metrics.winRatio, '%')}</strong></div>
-          <div><span>Win/loss ratio</span><strong>{scenario.metrics.winLossRatioInfinite ? '∞' : reportNumber(scenario.metrics.winLossRatio)}</strong></div>
-          <div><span>Sortino</span><strong>{scenario.metrics.sortinoInfinite ? '∞' : reportNumber(scenario.metrics.sortino, '', 4)}</strong></div>
-          <div><span>Calmar</span><strong>{reportNumber(scenario.metrics.calmar, '', 4)}</strong></div>
-          <div><span>Profit factor</span><strong>{scenario.metrics.profitFactorInfinite ? '∞' : reportNumber(scenario.metrics.profitFactor)}</strong></div>
-          <div><span>Closed trades</span><strong>{scenario.metrics.tradeCount.toLocaleString()}</strong></div>
-          <div><span>Trades / year</span><strong>{reportNumber(scenario.metrics.tradesPerYear)}</strong></div>
-          <div><span>Orders</span><strong>{scenario.metrics.orders.toLocaleString()}</strong></div>
+          <div>{metricLabel(scenario, 'Profit notional', 'Net portfolio profit or loss in the selected base currency, after configured trading costs.') }<strong>{reportMoney(scenario.metrics.profitNotional, currency)}</strong></div>
+          <div>{metricLabel(scenario, 'Profit', 'Net portfolio profit or loss as a percentage of the starting capital.') }<strong>{reportNumber(scenario.metrics.profitPct, '%')}</strong></div>
+          <div>{metricLabel(scenario, 'Maximum drawdown', 'Largest peak-to-trough decline in portfolio equity. The value shows both the currency amount and the percentage of the prior peak.') }<strong>{reportMoney(scenario.metrics.maxDrawdownDollars, currency)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
+          <div>{metricLabel(scenario, 'CAGR', 'Compound annual growth rate: the annualized rate that would grow starting equity to ending equity over the backtest period.') }<strong>{reportNumber(scenario.metrics.cagrPct, '%', 4)}</strong></div>
+          <div>{metricLabel(scenario, 'Win ratio', 'Closed trades with positive net profit divided by all closed trades.') }<strong>{reportNumber(scenario.metrics.winRatio, '%')}</strong></div>
+          <div>{metricLabel(scenario, 'Win/loss ratio', 'Average profit of winning trades divided by the absolute average loss of losing trades. Values above 1 mean the average winner is larger than the average loser.') }<strong>{scenario.metrics.winLossRatioInfinite ? '∞' : reportNumber(scenario.metrics.winLossRatio)}</strong></div>
+          <div>{metricLabel(scenario, 'Sortino', 'Annualized return divided by downside deviation, which measures variation from negative returns while ignoring upside variation.') }<strong>{scenario.metrics.sortinoInfinite ? '∞' : reportNumber(scenario.metrics.sortino, '', 4)}</strong></div>
+          <div>{metricLabel(scenario, 'Calmar', 'CAGR divided by the absolute maximum drawdown percentage. Higher values indicate more annualized return per unit of worst drawdown.') }<strong>{reportNumber(scenario.metrics.calmar, '', 4)}</strong></div>
+          <div>{metricLabel(scenario, 'Profit factor', 'Gross profit from winning trades divided by gross losses from losing trades. Above 1 means gross wins exceed gross losses.') }<strong>{scenario.metrics.profitFactorInfinite ? '∞' : reportNumber(scenario.metrics.profitFactor)}</strong></div>
+          <div>{metricLabel(scenario, 'Closed trades', 'Number of completed entry-and-exit trade pairs. Open positions are not included.') }<strong>{scenario.metrics.tradeCount.toLocaleString()}</strong></div>
+          <div>{metricLabel(scenario, 'Trades / year', 'Closed trade count divided by the backtest duration in years.') }<strong>{reportNumber(scenario.metrics.tradesPerYear)}</strong></div>
+          <div>{metricLabel(scenario, 'Orders', 'Total orders generated during this backtest, including entries, exits, and orders that did not become completed trades.') }<strong>{scenario.metrics.orders.toLocaleString()}</strong></div>
         </>}
       </div>
     </article>
@@ -647,13 +942,15 @@ function BacktestReport({ scenarios, compare }) {
       </>}
       {activeTab === 'performance' && <>
         <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div>
-        <p className="report-footnote">Sharpe and Sortino are annualized from daily UTC portfolio returns using √252. CAGR is annualized over the data span; Calmar divides CAGR by maximum drawdown. Win ratio is the percentage of completed trades that made a profit. Win/loss ratio is average winning profit divided by the absolute average losing profit. Profit factor is gross winning profit divided by gross losing profit, so it also reflects how often wins and losses occur. Portfolio profit includes open mark-to-market P&L; trade metrics use completed trades. When currency conversion is enabled, accounting and profit use the portfolio currency while entry and exit prices remain in each asset’s native currency. R multiples in the Trades table require a configured hard stop.</p>
       </>}
-      {activeTab === 'trades' && <div className="orders-table-wrap report-table-wrap">
-        <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Quantity</th><th>Entry</th><th>Exit</th><th>Net profit</th><th>R multiple</th></tr></thead>
-          <tbody>{detailScenario.trades?.length ? detailScenario.trades.map((trade, index) => <tr key={`${trade.bucketId}-${trade.instanceId}-${trade.entryTimestamp}-${index}`}><td>{trade.bucketId}</td><td>{trade.strategyName} · {trade.instanceId}</td><td>{trade.side}</td><td>{reportTimestamp(trade.entryTimestamp)}</td><td>{reportTimestamp(trade.exitTimestamp)}</td><td>{reportNumber(trade.quantity)}</td><td>{reportNumber(trade.entryPrice)}</td><td>{reportNumber(trade.exitPrice)}</td><td>{reportMoney(trade.profit, currency)}</td><td>{trade.riskReward == null ? '—' : `${reportNumber(trade.riskReward)} R`}</td></tr>) : <tr><td colSpan="10">No completed trades in this scenario.</td></tr>}</tbody>
+      {activeTab === 'trades' && visualizeSeries ? <TradeVisualizer key={`${detailScenario.scenarioId}:${visualizeSeries.bucketId || 'all'}:${visualizeSeries.instanceId || 'all'}`} focusedTrade={visualizeSeries === true ? null : visualizeSeries} onClose={() => setVisualizeSeries(false)} seriesOptions={tradeSeriesOptions} /> : activeTab === 'trades' && <>
+        {tradeSeriesOptions.length > 0 && <div className="trade-series-actions"><span>{detailScenario.trades.length.toLocaleString()} completed trades across {tradeSeriesOptions.length.toLocaleString()} data series</span><button className="trade-visualize-button" onClick={() => setVisualizeSeries(true)} type="button">Visualize series</button></div>}
+        <div className="orders-table-wrap report-table-wrap">
+        <table className="orders-table"><thead><tr><th>Bucket</th><th>Instrument</th><th>Strategy</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Quantity</th><th>Entry</th><th>Exit</th><th>Net profit</th><th>R multiple</th><th></th></tr></thead>
+          <tbody>{detailScenario.trades?.length ? detailScenario.trades.map((trade, index) => <tr key={`${trade.bucketId}-${trade.instanceId}-${trade.entryTimestamp}-${index}`}><td>{trade.bucketId}</td><td>{trade.instrument || '—'}</td><td>{trade.strategyName} · {trade.instanceId}</td><td>{trade.side}</td><td>{reportTimestamp(trade.entryTimestamp)}</td><td>{reportTimestamp(trade.exitTimestamp)}</td><td>{reportNumber(trade.quantity)}</td><td>{reportNumber(trade.entryPrice)}</td><td>{reportNumber(trade.exitPrice)}</td><td>{reportMoney(trade.profit, currency)}</td><td>{trade.riskReward == null ? '—' : `${reportNumber(trade.riskReward)} R`}</td><td><button className="trade-visualize-button" onClick={() => setVisualizeSeries(trade)} type="button">Visualize</button></td></tr>) : <tr><td colSpan="12">No completed trades in this scenario.</td></tr>}</tbody>
         </table>
-      </div>}
+        </div>
+      </>}
       {activeTab === 'orders' && <div className="orders-table-wrap report-table-wrap">
         <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy instance</th><th>Feed</th><th>Time (epoch ms)</th><th>Side</th><th>Quantity</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
           <tbody>{detailScenario.orders.length ? detailScenario.orders.map((order) => <tr key={`${order.bucketId}-${order.instanceId}-${order.id}-${order.timestamp}`}><td>{order.bucketId}</td><td>{order.strategyName} · {order.instanceId}</td><td>{order.feedId || '—'}</td><td>{order.timestamp}</td><td>{order.signal}</td><td>{reportNumber(order.quantity)}</td><td>{reportNumber(order.price)}</td><td>{order.status}</td><td>{order.reason}</td></tr>) : <tr><td colSpan="9">No orders were generated for this scenario.</td></tr>}</tbody>
@@ -673,6 +970,7 @@ function BacktestBucketPanel({
   onToggleFeed, onUpdateStrategy, onRemoveFeed, onUpdateFeed,
   onManualPathChange, onManualPathKeyDown, onAddManualPath,
 }) {
+  const [collapsedFeedSections, setCollapsedFeedSections] = useState({})
   const foreignCurrencies = [...new Set(dataFiles.map((feed) => feed.datasetSettings?.currency).filter((currency) => currency && currency !== baseCurrency))]
   const coveredCurrencies = (fxFile) => foreignCurrencies.filter((currency) => {
     const pair = [fxFile.datasetSettings?.fxBaseCurrency, fxFile.datasetSettings?.fxQuoteCurrency]
@@ -702,6 +1000,7 @@ function BacktestBucketPanel({
         {strategies.length > 0 && <div className="assembly-list">
           {strategies.map((strategy) => {
             const expanded = Boolean(expandedStrategies[strategy.instanceId])
+            const feedsExpanded = collapsedFeedSections[strategy.instanceId] === true
             return (
               <article className="strategy-config-card" key={strategy.instanceId}>
                 <div className="strategy-config-row">
@@ -714,13 +1013,15 @@ function BacktestBucketPanel({
                 {presetMenuInstanceId === strategy.instanceId && <div className="strategy-preset-menu"><label><span>Preset</span><select onChange={(event) => onSelectPreset(strategy.instanceId, event.target.value)} value={strategy.presetId || ''}><option value="" disabled>Select a preset</option>{(strategyPresets[strategy.id]?.presets || []).map((preset) => <option key={preset.id} value={preset.id}>{preset.name}{presetIsStale(preset, strategy) ? ' · stale' : ''}</option>)}</select></label>{(!strategyPresets[strategy.id]?.presets?.length) && <small>Create presets from this strategy file’s settings menu.</small>}</div>}
                 {expanded && <div className="strategy-config-details" id={`strategy-config-${strategy.instanceId}`}>
                   <section>
-                    <div className="config-section-heading"><h3>Connected feeds</h3><span>{strategy.feedIds.length} selected</span></div>
-                    {dataFiles.length ? <div className="feed-subscription-list">
+                    <button aria-expanded={feedsExpanded} className="feed-section-toggle" onClick={() => setCollapsedFeedSections((current) => ({ ...current, [strategy.instanceId]: !feedsExpanded }))} type="button">
+                      <span className="tree-chevron">{feedsExpanded ? '⌄' : '›'}</span><h3>Connected feeds</h3><span>{strategy.feedIds.length} selected</span>
+                    </button>
+                    {feedsExpanded && (dataFiles.length ? <div className="feed-subscription-list">
                       {dataFiles.map((feed) => <label className="feed-subscription-option" key={feed.instanceId}>
                         <input checked={strategy.feedIds.includes(feed.instanceId)} onChange={() => onToggleFeed(strategy.instanceId, feed.instanceId)} type="checkbox" />
                         <span>{feed.name}</span><small title={feed.path}>{feed.path}</small>
                       </label>)}
-                    </div> : <p className="input-help">Add a data feed to this bucket to connect it to the strategy.</p>}
+                    </div> : <p className="input-help">Add a data feed to this bucket to connect it to the strategy.</p>)}
                   </section>
                   <section>
                     <div className="config-section-heading"><h3>Base settings</h3></div>
@@ -730,9 +1031,7 @@ function BacktestBucketPanel({
                   </section>
                   <section>
                     <div className="config-section-heading"><h3>{strategy.name} settings</h3></div>
-                    <div className="config-grid">
-                      {strategy.parameters.map((field) => <ConfigField key={field.key} field={field} value={strategy.strategyConfigDraft[field.key]} onChange={(key, value) => onUpdateStrategy(strategy.instanceId, 'strategyConfigDraft', key, value)} />)}
-                    </div>
+                    <StrategyParameterFields fields={strategy.parameters} onChange={(key, value) => onUpdateStrategy(strategy.instanceId, 'strategyConfigDraft', key, value)} values={strategy.strategyConfigDraft} />
                   </section>
                 </div>}
               </article>
