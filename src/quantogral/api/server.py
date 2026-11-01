@@ -8,10 +8,12 @@ import os
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import tempfile
 import threading
 import uuid
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -759,23 +761,99 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             aggregate_timestamps.append(timestamp)
             aggregate_curve.append(sum(current_equities))
         orders.sort(key=lambda order: (order["timestamp"], order["bucketId"], order["instanceId"], order["id"]))
-        peak = initial_total
-        max_drawdown = 0.0
-        for point in aggregate_curve:
-            peak = max(peak, point)
-            if peak > 0:
-                max_drawdown = min(max_drawdown, point / peak - 1.0)
         final_total = aggregate_curve[-1] if aggregate_curve else initial_total
         output["equityCurve"] = aggregate_curve
         output["equityTimestamps"] = aggregate_timestamps
         output["orders"] = orders
+        entries: dict[tuple[str, str, int], dict[str, Any]] = {}
+        closed_trades = []
+        for order in orders:
+            if order.get("status") != "FILLED":
+                continue
+            parent_id = int(order.get("parentId", -1))
+            order_key = (order["bucketId"], order["instanceId"], parent_id)
+            signal = order.get("signal")
+            if parent_id < 0 and signal in {"LONG", "SHORT", "BUY", "SELL"}:
+                side = "LONG" if signal in {"LONG", "BUY"} else "SHORT"
+                entries[(order["bucketId"], order["instanceId"], int(order["id"]))] = {**order, "side": side}
+                continue
+            entry = entries.get(order_key)
+            if entry is None or (entry["side"] == "LONG" and signal != "SELL") or (entry["side"] == "SHORT" and signal != "COVER"):
+                continue
+            quantity = float(order["quantity"])
+            entry_price = float(entry["price"])
+            exit_price = float(order["price"])
+            gross_profit = (exit_price - entry_price) * quantity if entry["side"] == "LONG" else (entry_price - exit_price) * quantity
+            fees = (abs(entry_price * quantity) + abs(exit_price * quantity)) * cost_bps / 10_000.0
+            net_profit = gross_profit - fees
+            stop_distances = []
+            if entry.get("stopType") == "HARD":
+                stop_notional = float(entry.get("stopNotional", -1))
+                stop_percent = float(entry.get("stopPercent", -1))
+                if stop_notional > 0:
+                    stop_distances.append(stop_notional)
+                if stop_percent > 0:
+                    stop_distances.append(entry_price * stop_percent / 100.0)
+            risk_amount = min(stop_distances) * quantity if stop_distances else 0.0
+            closed_trades.append({
+                "bucketId": order["bucketId"], "instanceId": order["instanceId"],
+                "strategyName": order["strategyName"], "feedId": order.get("feedId", ""),
+                "side": entry["side"], "entryTimestamp": entry["timestamp"], "exitTimestamp": order["timestamp"],
+                "quantity": quantity, "entryPrice": entry_price, "exitPrice": exit_price,
+                "profit": net_profit, "riskReward": net_profit / risk_amount if risk_amount > 0 else None,
+            })
+        equity_timestamps = output.get("equityTimestamps", [])
+        equity_curve = output.get("equityCurve", [])
+        initial_total = initial_capital * len(output_buckets)
+        final_total = equity_curve[-1] if equity_curve else initial_total
+        peak = initial_total
+        max_drawdown_dollars = 0.0
+        max_drawdown_pct = 0.0
+        for point in equity_curve:
+            peak = max(peak, point)
+            drawdown_dollars = peak - point
+            drawdown_pct = drawdown_dollars / peak if peak > 0 else 0.0
+            max_drawdown_dollars = max(max_drawdown_dollars, drawdown_dollars)
+            max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
+        final_peak = max([initial_total, *equity_curve])
+        current_drawdown_dollars = final_peak - final_total
+        current_drawdown_pct = current_drawdown_dollars / final_peak if final_peak > 0 else 0.0
+        daily_equity: dict[Any, float] = {}
+        for timestamp, equity in zip(equity_timestamps, equity_curve):
+            day = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).date()
+            daily_equity[day] = equity
+        daily_returns = []
+        previous_equity = initial_total
+        for day in sorted(daily_equity):
+            current_equity = daily_equity[day]
+            if previous_equity > 0:
+                daily_returns.append(current_equity / previous_equity - 1.0)
+            previous_equity = current_equity
+        sharpe = None
+        if len(daily_returns) > 1:
+            volatility = statistics.stdev(daily_returns)
+            if volatility > 0:
+                sharpe = statistics.mean(daily_returns) / volatility * math.sqrt(252.0)
+        elapsed_years = ((max(equity_timestamps) - min(equity_timestamps)) / 86_400_000.0 / 365.25) if len(equity_timestamps) > 1 else 0.0
+        risk_reward_values = [trade["riskReward"] for trade in closed_trades if trade["riskReward"] is not None]
+        winning_trades = sum(1 for trade in closed_trades if trade["profit"] > 0)
         output["metrics"] = {
             "initialEquity": initial_total,
-            "finalEquity": final_total,
+            "finalEquity": final_total, "currentDrawdownDollars": current_drawdown_dollars,
+            "currentDrawdownPct": current_drawdown_pct * 100.0,
+            "maxDrawdownDollars": max_drawdown_dollars, "maxDrawdownPct": max_drawdown_pct * 100.0,
+            "profitNotional": final_total - initial_total,
+            "profitPct": ((final_total / initial_total) - 1.0) * 100.0 if initial_total else 0.0,
             "returnPct": ((final_total / initial_total) - 1.0) * 100.0 if initial_total else 0.0,
-            "maxDrawdownPct": max_drawdown * 100.0,
+            "sharpe": sharpe,
+            "winRatio": winning_trades / len(closed_trades) * 100.0 if closed_trades else None,
+            "averageRiskReward": statistics.mean(risk_reward_values) if risk_reward_values else None,
+            "averageProfitPerTrade": sum(trade["profit"] for trade in closed_trades) / len(closed_trades) if closed_trades else None,
+            "tradeCount": len(closed_trades),
+            "tradesPerYear": len(closed_trades) / elapsed_years if elapsed_years > 0 else None,
             "orders": len(orders),
         }
+        output["trades"] = closed_trades
         return output
 
     scenarios = []

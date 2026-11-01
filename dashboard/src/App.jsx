@@ -308,6 +308,82 @@ function EquityCurveChart({ scenarios }) {
   )
 }
 
+function reportMoney(value) {
+  return Number.isFinite(value) ? value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : '—'
+}
+
+function reportNumber(value, suffix = '') {
+  return Number.isFinite(value) ? `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}${suffix}` : '—'
+}
+
+function reportTimestamp(timestamp) {
+  const date = new Date(timestamp)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
+}
+
+function BacktestReport({ scenarios, compare }) {
+  const [activeTab, setActiveTab] = useState('general')
+  const [detailScenarioId, setDetailScenarioId] = useState(scenarios[0]?.scenarioId || 'both')
+  const detailScenario = scenarios.find((scenario) => scenario.scenarioId === detailScenarioId) || scenarios[0]
+  const tabs = [
+    ['general', 'General Report'], ['performance', 'Performance'], ['trades', 'Trades'], ['orders', 'Order Log'],
+  ]
+  const scenarioMetricCards = (kind) => scenarios.map((scenario) => (
+    <article className="report-scenario-card" key={scenario.scenarioId}>
+      <h3>{scenario.scenarioLabel}</h3>
+      <div className="report-metric-grid">
+        {kind === 'general' ? <>
+          <div><span>Equity</span><strong>{reportMoney(scenario.metrics.finalEquity)}</strong></div>
+          <div><span>Current drawdown</span><strong>{reportMoney(scenario.metrics.currentDrawdownDollars)} · {reportNumber(scenario.metrics.currentDrawdownPct, '%')}</strong></div>
+          <div><span>Sharpe</span><strong>{reportNumber(scenario.metrics.sharpe)}</strong></div>
+          <div><span>Average profit / trade</span><strong>{reportMoney(scenario.metrics.averageProfitPerTrade)}</strong></div>
+          <div><span>Trades / year</span><strong>{reportNumber(scenario.metrics.tradesPerYear)}</strong></div>
+        </> : <>
+          <div><span>Profit notional</span><strong>{reportMoney(scenario.metrics.profitNotional)}</strong></div>
+          <div><span>Profit</span><strong>{reportNumber(scenario.metrics.profitPct, '%')}</strong></div>
+          <div><span>Maximum drawdown</span><strong>{reportMoney(scenario.metrics.maxDrawdownDollars)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
+          <div><span>Win ratio</span><strong>{reportNumber(scenario.metrics.winRatio, '%')}</strong></div>
+          <div><span>Average R:R</span><strong>{scenario.metrics.averageRiskReward == null ? '—' : `${reportNumber(scenario.metrics.averageRiskReward)} R`}</strong></div>
+          <div><span>Closed trades</span><strong>{scenario.metrics.tradeCount.toLocaleString()}</strong></div>
+          <div><span>Trades / year</span><strong>{reportNumber(scenario.metrics.tradesPerYear)}</strong></div>
+          <div><span>Orders</span><strong>{scenario.metrics.orders.toLocaleString()}</strong></div>
+        </>}
+      </div>
+    </article>
+  ))
+
+  return (
+    <section className="backtest-report">
+      <div className="config-section-heading"><h2>Report</h2><span>{compare ? 'Three independent runs · same starting capital' : detailScenario.scenarioLabel}</span></div>
+      <nav aria-label="Backtest report sections" className="report-tabs">
+        {tabs.map(([id, label]) => <button aria-current={activeTab === id ? 'page' : undefined} className={activeTab === id ? 'is-active' : ''} key={id} onClick={() => setActiveTab(id)} type="button">{label}</button>)}
+      </nav>
+      {compare && (activeTab === 'trades' || activeTab === 'orders') && <div className="backtest-scenario-tabs" aria-label="Choose scenario details">
+        <span>Scenario:</span>
+        {scenarios.map((scenario) => <button aria-pressed={detailScenario.scenarioId === scenario.scenarioId} className={detailScenario.scenarioId === scenario.scenarioId ? 'is-active' : ''} key={scenario.scenarioId} onClick={() => setDetailScenarioId(scenario.scenarioId)} type="button">{scenario.scenarioLabel}</button>)}
+      </div>}
+      {activeTab === 'general' && <>
+        <EquityCurveChart scenarios={scenarios} />
+        <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('general')}</div>
+      </>}
+      {activeTab === 'performance' && <>
+        <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div>
+        <p className="report-footnote">Sharpe is annualized from daily UTC equity returns using √252. Profit notional includes open mark-to-market P&L; win ratio and average profit use completed trades. Average R:R uses completed trades with a configured hard stop; trades without one are excluded.</p>
+      </>}
+      {activeTab === 'trades' && <div className="orders-table-wrap report-table-wrap">
+        <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Quantity</th><th>Entry</th><th>Exit</th><th>Net profit</th><th>R multiple</th></tr></thead>
+          <tbody>{detailScenario.trades?.length ? detailScenario.trades.map((trade, index) => <tr key={`${trade.bucketId}-${trade.instanceId}-${trade.entryTimestamp}-${index}`}><td>{trade.bucketId}</td><td>{trade.strategyName} · {trade.instanceId}</td><td>{trade.side}</td><td>{reportTimestamp(trade.entryTimestamp)}</td><td>{reportTimestamp(trade.exitTimestamp)}</td><td>{reportNumber(trade.quantity)}</td><td>{reportNumber(trade.entryPrice)}</td><td>{reportNumber(trade.exitPrice)}</td><td>{reportMoney(trade.profit)}</td><td>{trade.riskReward == null ? '—' : `${reportNumber(trade.riskReward)} R`}</td></tr>) : <tr><td colSpan="10">No completed trades in this scenario.</td></tr>}</tbody>
+        </table>
+      </div>}
+      {activeTab === 'orders' && <div className="orders-table-wrap report-table-wrap">
+        <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy instance</th><th>Feed</th><th>Time (epoch ms)</th><th>Side</th><th>Quantity</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
+          <tbody>{detailScenario.orders.length ? detailScenario.orders.map((order) => <tr key={`${order.bucketId}-${order.instanceId}-${order.id}-${order.timestamp}`}><td>{order.bucketId}</td><td>{order.strategyName} · {order.instanceId}</td><td>{order.feedId || '—'}</td><td>{order.timestamp}</td><td>{order.signal}</td><td>{reportNumber(order.quantity)}</td><td>{reportNumber(order.price)}</td><td>{order.status}</td><td>{order.reason}</td></tr>) : <tr><td colSpan="9">No orders were generated for this scenario.</td></tr>}</tbody>
+        </table>
+      </div>}
+    </section>
+  )
+}
+
 function BacktestBucketPanel({
   bucket, strategies, dataFiles, strategyCatalog, expandedStrategies, selectedForSidebar,
   strategyDropHover, dataDropHover, manualDataPath, onSelectBucket, onAddStrategy,
@@ -1455,27 +1531,8 @@ function App() {
             {backtestResult && (
               <section className="backtest-results">
                 <div className="config-section-heading"><h2>Run results</h2><span>{activeBacktestReport.buckets.length} buckets · {backtestResult.inputRows.toLocaleString()} feed rows per scenario</span></div>
-                {compareBacktestReports ? (
-                  <div className="scenario-summary-list">
-                    {resultScenarios.map((scenario) => <article className="scenario-summary-card" key={scenario.scenarioId} style={{ '--curve-color': scenario.scenarioId === 'both' ? '#77b9f2' : scenario.scenarioId === 'long_only' ? '#6dc792' : '#e29b7b' }}>
-                      <h3>{scenario.scenarioLabel}</h3>
-                      <div><span>Final equity</span><strong>{scenario.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></div>
-                      <div><span>Return</span><strong>{scenario.metrics.returnPct.toFixed(2)}%</strong></div>
-                      <div><span>Max drawdown</span><strong>{scenario.metrics.maxDrawdownPct.toFixed(2)}%</strong></div>
-                      <div><span>Orders</span><strong>{scenario.metrics.orders}</strong></div>
-                    </article>)}
-                  </div>
-                ) : (
-                  <div className="result-metrics">
-                    <div><span>Final equity</span><strong>{activeBacktestReport.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></div>
-                    <div><span>Return</span><strong>{activeBacktestReport.metrics.returnPct.toFixed(2)}%</strong></div>
-                    <div><span>Max drawdown</span><strong>{activeBacktestReport.metrics.maxDrawdownPct.toFixed(2)}%</strong></div>
-                    <div><span>Orders</span><strong>{activeBacktestReport.metrics.orders}</strong></div>
-                  </div>
-                )}
-                <EquityCurveChart scenarios={compareBacktestReports ? resultScenarios : [activeBacktestReport]} />
-                {compareBacktestReports && <div className="backtest-scenario-tabs" aria-label="Choose scenario details">
-                  <span>Show bucket and order details:</span>
+                {compareBacktestReports && <div className="backtest-scenario-tabs" aria-label="Choose scenario bucket details">
+                  <span>Bucket details:</span>
                   {resultScenarios.map((scenario) => <button aria-pressed={activeBacktestReport.scenarioId === scenario.scenarioId} className={activeBacktestReport.scenarioId === scenario.scenarioId ? 'is-active' : ''} key={scenario.scenarioId} onClick={() => setActiveBacktestScenarioId(scenario.scenarioId)} type="button">{scenario.scenarioLabel}</button>)}
                 </div>}
                 <div className="bucket-result-list">
@@ -1489,11 +1546,7 @@ function App() {
                     <div className="bucket-result-strategies">{bucket.strategies.map((strategy) => <span key={strategy.instanceId}>{strategy.name} <code>{strategy.instanceId}</code> · {strategy.orders.length} orders</span>)}</div>
                   </article>)}
                 </div>
-                <div className="orders-table-wrap">
-                  <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy instance</th><th>Feed</th><th>Time (epoch ms)</th><th>Side</th><th>Quantity</th><th>Price</th><th>Status</th></tr></thead>
-                    <tbody>{activeBacktestReport.orders.length ? activeBacktestReport.orders.map((order) => <tr key={`${order.bucketId}-${order.instanceId}-${order.id}-${order.timestamp}`}><td>{backtestBuckets.find((item) => item.id === order.bucketId)?.name || order.bucketId}</td><td>{order.strategyName} · {order.instanceId}</td><td>{order.feedId || "—"}</td><td>{order.timestamp}</td><td>{order.signal}</td><td>{order.quantity}</td><td>{order.price.toFixed(4)}</td><td>{order.status}</td></tr>) : <tr><td colSpan="8">No orders were generated for this data and configuration.</td></tr>}</tbody>
-                  </table>
-                </div>
+                <BacktestReport compare={compareBacktestReports} scenarios={resultScenarios} />
               </section>
             )}
           </section>

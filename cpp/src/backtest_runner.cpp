@@ -169,6 +169,14 @@ const char* status_name(ORDER_STATUS status) {
     return "UNKNOWN";
 }
 
+const char* stop_type_name(STOP_TYPE type) {
+    switch (type) {
+        case STOP_TYPE::NONE: return "NONE";
+        case STOP_TYPE::HARD: return "HARD";
+    }
+    return "UNKNOWN";
+}
+
 TS_UNIT parse_ts_unit(const std::string& value) {
     if (value == "SECONDS") return TS_UNIT::SECONDS;
     if (value == "MILLISECONDS") return TS_UNIT::MILLISECONDS;
@@ -205,11 +213,15 @@ void print_orders(const std::vector<OrderEvent>& orders) {
         const auto& order = orders[i];
         if (i) std::cout << ',';
         std::cout << "{\"id\":" << order.id
+                  << ",\"parentId\":" << order.pid
                   << ",\"timestamp\":" << order.ts
                   << ",\"feedId\":\"" << json_escape(order.symbol) << "\""
                   << ",\"signal\":\"" << signal_name(order.signal) << "\""
                   << ",\"quantity\":" << order.qty
                   << ",\"price\":" << order.price
+                  << ",\"stopType\":\"" << stop_type_name(order.sl.type) << "\""
+                  << ",\"stopNotional\":" << order.sl.slnot
+                  << ",\"stopPercent\":" << order.sl.slpct
                   << ",\"status\":\"" << status_name(order.status) << "\""
                   << ",\"reason\":\"" << json_escape(order.reason) << "\"}";
     }
