@@ -20,6 +20,11 @@ trap cleanup EXIT INT TERM
 
 api_ready=false
 for _ in {1..40}; do
+  # Do not mistake a different, already-running API on port 8000 for this
+  # process. That can leave the UI talking to stale backend code.
+  if ! kill -0 "$api_pid" 2>/dev/null; then
+    break
+  fi
   if "$api_python" -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=0.3)' >/dev/null 2>&1; then
     api_ready=true
     break
@@ -27,7 +32,7 @@ for _ in {1..40}; do
   sleep 0.25
 done
 if [[ "$api_ready" != true ]]; then
-  echo "Quantogral's local API did not start on 127.0.0.1:8000. Another process may already be using that port; stop the other Quantogral server and try again."
+  echo "Quantogral's local API did not start on 127.0.0.1:8000. Stop any other Quantogral server using that port, then run ./start.sh again."
   exit 1
 fi
 

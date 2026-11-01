@@ -395,7 +395,7 @@ function App() {
   const [isSearchingYahoo, setIsSearchingYahoo] = useState(false)
   const [yahooSearchError, setYahooSearchError] = useState('')
   const [yahooInterval, setYahooInterval] = useState('1d')
-  const [yahooFormat, setYahooFormat] = useState('csv')
+  const [yahooFormat, setYahooFormat] = useState('parquet')
   const [yahooFilenameTemplate, setYahooFilenameTemplate] = useState('{name}_{ts}_{startdate}_{enddate}_{tz}_{provider}.{extension}')
   const [yahooStartDate, setYahooStartDate] = useState(defaultStartDate)
   const [yahooEndDate, setYahooEndDate] = useState(() => localDateString(new Date()))
@@ -1255,7 +1255,7 @@ function App() {
                   <label className="config-field"><span>Time interval</span><select onChange={(event) => setYahooInterval(event.target.value)} value={yahooInterval}>
                     <option value="1m">1 minute</option><option value="2m">2 minutes</option><option value="5m">5 minutes</option><option value="15m">15 minutes</option><option value="30m">30 minutes</option><option value="60m">60 minutes</option><option value="90m">90 minutes</option><option value="1h">1 hour</option><option value="1d">Daily</option><option value="5d">5 days</option><option value="1wk">Weekly</option><option value="1mo">Monthly</option><option value="3mo">Quarterly</option>
                   </select></label>
-                  <label className="config-field"><span>File format</span><select onChange={(event) => setYahooFormat(event.target.value)} value={yahooFormat}><option value="csv">CSV (.csv)</option><option value="parquet">Parquet (.parquet)</option></select></label>
+                  <label className="config-field"><span>File format</span><select onChange={(event) => setYahooFormat(event.target.value)} value={yahooFormat}><option value="parquet">Parquet (.parquet) — default</option><option value="csv">CSV (.csv)</option></select></label>
                   <label className="config-field"><span>Start date</span><input max={yahooToday} onChange={(event) => { setYahooStartDate(event.target.value); setYahooDownloadError(''); setYahooDownloadResult(null) }} type="date" value={yahooStartDate} /></label>
                   <label className="config-field"><span>End date (inclusive)</span><input max={yahooToday} onChange={(event) => { setYahooEndDate(event.target.value); setYahooDownloadError(''); setYahooDownloadResult(null) }} type="date" value={yahooEndDate} /></label>
                 </div>

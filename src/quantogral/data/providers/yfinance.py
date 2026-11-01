@@ -54,7 +54,7 @@ def search_yahoo_symbols(query: str) -> list[dict[str, str]]:
 
 
 def download_yahoo_history(
-    *, ticker: str, interval: str, start_date: str, end_date: str, file_format: str,
+    *, ticker: str, interval: str, start_date: str, end_date: str, file_format: str = "parquet",
     destination: str | Path, filename_template: str | None = None, overwrite_filenames: set[str] | None = None,
 ) -> dict[str, Any]:
     """Download one Yahoo symbol and write its OHLCV rows without overwriting files."""

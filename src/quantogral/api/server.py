@@ -799,7 +799,7 @@ def run_yahoo_download_job(
                 interval=payload.get("interval"),
                 start_date=payload.get("startDate"),
                 end_date=payload.get("endDate"),
-                file_format=payload.get("format"),
+                file_format=payload.get("format") or "parquet",
                 destination=destination,
                 filename_template=payload.get("filenameTemplate"),
                 overwrite_filenames=overwrite_files,
