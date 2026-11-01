@@ -46,6 +46,27 @@ struct StrategyContext {
     double opos = 0.0;
     double equity = 0.0;
     std::vector<OrderEvent> oposlog;
+    std::string_view feed_id;
+    struct FeedView {
+        std::string_view id;
+        const MarketEvent* latest_event = nullptr;
+        double position = 0.0;
+    };
+    std::span<const FeedView> feeds;
+
+    const MarketEvent* latest_event(std::string_view id) const {
+        for (const auto& feed : feeds) {
+            if (feed.id == id) return feed.latest_event;
+        }
+        return nullptr;
+    }
+
+    double position_for(std::string_view id) const {
+        for (const auto& feed : feeds) {
+            if (feed.id == id) return feed.position;
+        }
+        return 0.0;
+    }
 };
 
 
@@ -124,7 +145,7 @@ protected:
             return to_epoch_ms(ts, bconfig.ts_unit);
         }
         else {
-            static_assert(false, "resolve_ts: timestamp field type not supported");
+            static_assert(!std::is_same_v<Tin, Tin>, "resolve_ts: timestamp field type not supported");
         }
     }
 };
