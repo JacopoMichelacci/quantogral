@@ -610,9 +610,12 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     allocation_mode = value(backtest, "capital_allocation", "SHARED")
     if allocation_mode not in {"SHARED", "EQUAL_PER_STRATEGY"}:
         raise ValueError("Capital allocation must be SHARED or EQUAL_PER_STRATEGY.")
+    run_mode = value(backtest, "run_mode", "BOTH")
+    if run_mode not in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
+        raise ValueError("Choose Both allowed, Long only, Short only, or Compare all.")
     strategy_catalog = {item["id"]: item for item in strategy_catalog_from_headers()}
 
-    arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, str(fill_latency_seconds), str(len(buckets))]
+    arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, str(fill_latency_seconds), "BOTH", str(len(buckets))]
     temp_dirs: list[Any] = []
     prepared_buckets: list[dict[str, Any]] = []
     instance_ids: set[str] = set()
@@ -688,107 +691,102 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 prepared_strategies.append({"instanceId": instance_id, "strategyId": strategy_id, "name": strategy_meta["name"]})
             prepared_buckets.append({"id": bucket_id, "feeds": prepared_feeds, "strategies": prepared_strategies})
 
-        try:
-            result = subprocess.run(arguments, capture_output=True, text=True, timeout=300, check=False)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("The C++ backtest exceeded the 5-minute time limit.") from error
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or "C++ backtest failed.").strip()[-4000:])
-        output = json.loads(result.stdout)
+        scenario_specs = {
+            "BOTH": [("both", "Both allowed", "BOTH")],
+            "LONG_ONLY": [("long_only", "Long only", "LONG_ONLY")],
+            "SHORT_ONLY": [("short_only", "Short only", "SHORT_ONLY")],
+            "COMPARE_ALL": [
+                ("both", "Both allowed", "BOTH"),
+                ("long_only", "Long only", "LONG_ONLY"),
+                ("short_only", "Short only", "SHORT_ONLY"),
+            ],
+        }[run_mode]
+        raw_scenarios = []
+        for scenario_id, scenario_label, direction_mode in scenario_specs:
+            scenario_arguments = arguments.copy()
+            scenario_arguments[6] = direction_mode
+            try:
+                result = subprocess.run(scenario_arguments, capture_output=True, text=True, timeout=300, check=False)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError(f"The {scenario_label.lower()} backtest exceeded the 5-minute time limit.") from error
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or "C++ backtest failed.").strip()[-4000:])
+            raw_scenarios.append((scenario_id, scenario_label, json.loads(result.stdout)))
     finally:
         for temp_dir in temp_dirs:
             temp_dir.cleanup()
 
-    output_buckets = output.get("buckets", [])
-    for bucket_index, bucket in enumerate(output_buckets):
-        bucket["feeds"] = prepared_buckets[bucket_index]["feeds"]
-        strategy_metadata = {item["instanceId"]: item for item in prepared_buckets[bucket_index]["strategies"]}
-        for strategy in bucket.get("strategies", []):
-            metadata = strategy_metadata[strategy["instanceId"]]
-            strategy["strategyId"] = metadata["strategyId"]
-            strategy["name"] = metadata["name"]
-        equity = bucket.get("equityCurve", [])
-        peak = initial_capital
+    def process_scenario(output: dict[str, Any]) -> dict[str, Any]:
+        output_buckets = output.get("buckets", [])
+        for bucket_index, bucket in enumerate(output_buckets):
+            bucket["feeds"] = prepared_buckets[bucket_index]["feeds"]
+            strategy_metadata = {item["instanceId"]: item for item in prepared_buckets[bucket_index]["strategies"]}
+            for strategy in bucket.get("strategies", []):
+                metadata = strategy_metadata[strategy["instanceId"]]
+                strategy["strategyId"] = metadata["strategyId"]
+                strategy["name"] = metadata["name"]
+            equity = bucket.get("equityCurve", [])
+            peak = initial_capital
+            max_drawdown = 0.0
+            for point in equity:
+                peak = max(peak, point)
+                if peak > 0:
+                    max_drawdown = min(max_drawdown, point / peak - 1.0)
+            bucket["metrics"] = {
+                "initialEquity": initial_capital,
+                "finalEquity": equity[-1] if equity else initial_capital,
+                "returnPct": (((equity[-1] if equity else initial_capital) / initial_capital) - 1.0) * 100.0 if initial_capital else 0.0,
+                "maxDrawdownPct": max_drawdown * 100.0,
+                "orders": sum(len(strategy.get("orders", [])) for strategy in bucket.get("strategies", [])),
+            }
+        output["inputRows"] = int(output.get("inputRows", 0))
+        output["buckets"] = output_buckets
+        initial_total = initial_capital * len(output_buckets)
+        aggregate_values: dict[int, list[tuple[int, float]]] = {}
+        orders = []
+        for bucket_index, bucket in enumerate(output_buckets):
+            for timestamp, equity in zip(bucket.get("equityTimestamps", []), bucket.get("equityCurve", [])):
+                aggregate_values.setdefault(timestamp, []).append((bucket_index, equity))
+            for strategy in bucket.get("strategies", []):
+                for order in strategy.get("orders", []):
+                    orders.append({**order, "bucketId": bucket["id"], "instanceId": strategy["instanceId"], "strategyId": strategy["strategyId"], "strategyName": strategy["name"]})
+        current_equities = [initial_capital] * len(output_buckets)
+        aggregate_curve = []
+        aggregate_timestamps = []
+        for timestamp in sorted(aggregate_values):
+            for bucket_index, equity in aggregate_values[timestamp]:
+                current_equities[bucket_index] = equity
+            aggregate_timestamps.append(timestamp)
+            aggregate_curve.append(sum(current_equities))
+        orders.sort(key=lambda order: (order["timestamp"], order["bucketId"], order["instanceId"], order["id"]))
+        peak = initial_total
         max_drawdown = 0.0
-        for point in equity:
+        for point in aggregate_curve:
             peak = max(peak, point)
             if peak > 0:
                 max_drawdown = min(max_drawdown, point / peak - 1.0)
-        bucket["metrics"] = {
-            "initialEquity": initial_capital,
-            "finalEquity": equity[-1] if equity else initial_capital,
-            "returnPct": (((equity[-1] if equity else initial_capital) / initial_capital) - 1.0) * 100.0 if initial_capital else 0.0,
+        final_total = aggregate_curve[-1] if aggregate_curve else initial_total
+        output["equityCurve"] = aggregate_curve
+        output["equityTimestamps"] = aggregate_timestamps
+        output["orders"] = orders
+        output["metrics"] = {
+            "initialEquity": initial_total,
+            "finalEquity": final_total,
+            "returnPct": ((final_total / initial_total) - 1.0) * 100.0 if initial_total else 0.0,
             "maxDrawdownPct": max_drawdown * 100.0,
-            "orders": sum(len(strategy.get("orders", [])) for strategy in bucket.get("strategies", [])),
+            "orders": len(orders),
         }
-    output["inputRows"] = int(output.get("inputRows", 0))
-    output["buckets"] = output_buckets
-    initial_total = initial_capital * len(output_buckets)
-    aggregate_values: dict[int, list[tuple[int, float]]] = {}
-    orders = []
-    for bucket_index, bucket in enumerate(output_buckets):
-        for timestamp, equity in zip(bucket.get("equityTimestamps", []), bucket.get("equityCurve", [])):
-            aggregate_values.setdefault(timestamp, []).append((bucket_index, equity))
-        for strategy in bucket.get("strategies", []):
-            for order in strategy.get("orders", []):
-                orders.append({**order, "bucketId": bucket["id"], "instanceId": strategy["instanceId"], "strategyId": strategy["strategyId"], "strategyName": strategy["name"]})
-    current_equities = [initial_capital] * len(output_buckets)
-    aggregate_curve = []
-    aggregate_timestamps = []
-    for timestamp in sorted(aggregate_values):
-        for bucket_index, equity in aggregate_values[timestamp]:
-            current_equities[bucket_index] = equity
-        aggregate_timestamps.append(timestamp)
-        aggregate_curve.append(sum(current_equities))
-    orders.sort(key=lambda order: (order["timestamp"], order["bucketId"], order["instanceId"], order["id"]))
-    peak = initial_total
-    max_drawdown = 0.0
-    for point in aggregate_curve:
-        peak = max(peak, point)
-        if peak > 0:
-            max_drawdown = min(max_drawdown, point / peak - 1.0)
-    final_total = aggregate_curve[-1] if aggregate_curve else initial_total
-    output["equityCurve"] = aggregate_curve
-    output["equityTimestamps"] = aggregate_timestamps
-    output["orders"] = orders
-    output["metrics"] = {
-        "initialEquity": initial_total,
-        "finalEquity": final_total,
-        "returnPct": ((final_total / initial_total) - 1.0) * 100.0 if initial_total else 0.0,
-        "maxDrawdownPct": max_drawdown * 100.0,
-        "orders": len(orders),
-    }
-    return output
-    try:
-        result = subprocess.run(arguments, capture_output=True, text=True, timeout=300, check=False)
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError("The C++ backtest exceeded the 5-minute time limit.") from error
-    finally:
-        if temporary_data is not None:
-            temporary_data.cleanup()
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or "C++ backtest failed.").strip()[-4000:])
+        return output
 
-    output = json.loads(result.stdout)
-    equity = output.get("equityCurve", [])
-    initial = float(value(backtest, "initial_capital", 100000))
-    final = equity[-1] if equity else initial
-    peak = initial
-    max_drawdown = 0.0
-    for point in equity:
-        peak = max(peak, point)
-        if peak > 0:
-            max_drawdown = min(max_drawdown, point / peak - 1.0)
-    output["metrics"] = {
-        "initialEquity": initial,
-        "finalEquity": final,
-        "returnPct": ((final / initial) - 1.0) * 100.0 if initial else 0.0,
-        "maxDrawdownPct": max_drawdown * 100.0,
-        "orders": len(output.get("orders", [])),
-    }
-    return output
-
-
+    scenarios = []
+    for scenario_id, scenario_label, raw_output in raw_scenarios:
+        processed = process_scenario(raw_output)
+        processed["scenarioId"] = scenario_id
+        processed["scenarioLabel"] = scenario_label
+        scenarios.append(processed)
+    if run_mode == "COMPARE_ALL":
+        return {"runMode": run_mode, "inputRows": scenarios[0]["inputRows"], "scenarios": scenarios}
+    return scenarios[0]
 def run_yahoo_download_job(
     job_id: str, payload: dict[str, Any], *, overwrite_files: set[str] | None = None, initial_completed: int = 0,
 ) -> None:

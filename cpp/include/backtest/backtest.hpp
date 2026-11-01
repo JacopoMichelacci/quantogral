@@ -121,12 +121,19 @@ enum class CAPITAL_ALLOCATION_MODE {
     EQUAL_PER_STRATEGY,
 };
 
+enum class TRADE_DIRECTION_MODE {
+    BOTH,
+    LONG_ONLY,
+    SHORT_ONLY,
+};
+
 struct BacktestConfig {
     double initial_capital = 100'000.0;
     double cost_bps = 3.0;
     std::string currency = "USD";
     CAPITAL_ALLOCATION_MODE capital_allocation = CAPITAL_ALLOCATION_MODE::SHARED;
     double fill_latency_seconds = 0.0;
+    TRADE_DIRECTION_MODE direction_mode = TRADE_DIRECTION_MODE::BOTH;
 };
 
 template <typename Tin>
@@ -570,6 +577,8 @@ private:
                         std::vector<OrderEvent>& history, OrderIdGenerator& id_generator,
                         Strategy<Tin>& strategy) const {
         const auto& settings = strategy.get_config();
+        const bool long_allowed = settings.long_active && config_.direction_mode != TRADE_DIRECTION_MODE::SHORT_ONLY;
+        const bool short_allowed = settings.short_active && config_.direction_mode != TRADE_DIRECTION_MODE::LONG_ONLY;
         for (auto& order : orders) {
             if (order.signal == SIGNAL::FLAT) continue;
             const bool is_buy = order.signal == SIGNAL::LONG || order.signal == SIGNAL::BBUY || order.signal == SIGNAL::COVER;
@@ -601,7 +610,7 @@ private:
 
             switch (order.signal) {
                 case SIGNAL::LONG:
-                    if (!settings.long_active || position < 0.0 || (!settings.stacking && position > 0.0)) {
+                    if (!long_allowed || position < 0.0 || (!settings.stacking && position > 0.0)) {
                         reject(order, "long order not allowed"); history.push_back(order); break;
                     }
                     fill_buy(order, price, cash, position);
@@ -609,7 +618,7 @@ private:
                     history.push_back(order);
                     break;
                 case SIGNAL::SHORT:
-                    if (!settings.short_active || position > 0.0 || (!settings.stacking && position < 0.0)) {
+                    if (!short_allowed || position > 0.0 || (!settings.stacking && position < 0.0)) {
                         reject(order, "short order not allowed"); history.push_back(order); break;
                     }
                     fill_sell(order, price, cash, position);
@@ -631,7 +640,7 @@ private:
                     close_open_lots(lots, SIGNAL::SHORT, order, history, id_generator);
                     break;
                 case SIGNAL::BBUY: {
-                    if ((!settings.long_active && (position >= 0.0 || order.qty > -position)) ||
+                    if ((!long_allowed && (position >= 0.0 || order.qty > -position)) ||
                         (!settings.stacking && position > 0.0)) {
                         reject(order, "buy order not allowed"); history.push_back(order); break;
                     }
@@ -656,7 +665,7 @@ private:
                     break;
                 }
                 case SIGNAL::BSELL: {
-                    if ((!settings.short_active && (position <= 0.0 || order.qty > position)) ||
+                    if ((!short_allowed && (position <= 0.0 || order.qty > position)) ||
                         (!settings.stacking && position < 0.0)) {
                         reject(order, "sell order not allowed"); history.push_back(order); break;
                     }

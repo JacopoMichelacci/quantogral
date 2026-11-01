@@ -333,6 +333,24 @@ code { color: #b8d8fa; }
 .result-metrics > div { display: grid; gap: 5px; padding: 10px; border: 1px solid #292d32; border-radius: 6px; background: #0d0f11; }
 .result-metrics span { color: #89929b; font-size: .72rem; }
 .result-metrics strong { color: #e8edf1; font-size: 1.02rem; font-variant-numeric: tabular-nums; }
+.scenario-summary-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+.scenario-summary-card { display: grid; gap: 8px; padding: 11px; border: 1px solid #292d32; border-top: 2px solid var(--curve-color); border-radius: 6px; background: #0d0f11; }
+.scenario-summary-card h3 { margin: 0 0 2px; color: #e8edf1; font-size: .83rem; }
+.scenario-summary-card div { display: flex; justify-content: space-between; gap: 8px; color: #89929b; font-size: .7rem; }
+.scenario-summary-card strong { color: #e8edf1; font-variant-numeric: tabular-nums; }
+.equity-chart-card { margin: 14px 0; padding: 12px; border: 1px solid #292d32; border-radius: 7px; background: #0d0f11; }
+.equity-chart-card .config-section-heading { margin-bottom: 8px; }
+.equity-chart-card .config-section-heading h3 { margin: 0; color: #dce2e7; font-size: .82rem; }
+.equity-chart { display: block; width: 100%; height: auto; max-height: 300px; overflow: visible; }
+.equity-chart line { stroke: #282d32; stroke-width: 1; }
+.equity-chart text { fill: #78838c; font-size: 11px; font-family: inherit; }
+.equity-chart polyline { fill: none; stroke: var(--curve-color); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.equity-chart-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 8px 0 0 54px; }
+.equity-chart-legend span { display: inline-flex; align-items: center; gap: 6px; color: #aab3bb; font-size: .7rem; }
+.equity-chart-legend i { width: 9px; height: 9px; border-radius: 50%; background: var(--curve-color); }
+.backtest-scenario-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; color: #8b959d; font-size: .72rem; }
+.backtest-scenario-tabs button { border: 1px solid #30363d; border-radius: 5px; padding: 5px 8px; color: #aab3bb; background: #121518; font-size: .7rem; }
+.backtest-scenario-tabs button.is-active { border-color: #5791c1; color: #d7eafa; background: #17232d; }
 .orders-table-wrap { overflow-x: auto; }
 .orders-table { width: 100%; border-collapse: collapse; font-size: .78rem; font-variant-numeric: tabular-nums; }
 .orders-table th, .orders-table td { padding: 10px 11px; border-bottom: 1px solid #25292d; text-align: left; white-space: nowrap; }
@@ -470,6 +488,18 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .assembly-add-button { border-color: #cbd2d8; color: #3a566b; background: #fff; }
 .app-shell[data-theme="light"] .strategy-config-details { border-color: #e0e4e8; }
 .app-shell[data-theme="light"] .result-metrics > div { border-color: #d8dde2; background: #f8f9fa; }
+.app-shell[data-theme="light"] .scenario-summary-card,
+.app-shell[data-theme="light"] .equity-chart-card { border-color: #d8dde2; background: #f8f9fa; }
+.app-shell[data-theme="light"] .scenario-summary-card h3,
+.app-shell[data-theme="light"] .scenario-summary-card strong,
+.app-shell[data-theme="light"] .equity-chart-card .config-section-heading h3 { color: #283139; }
+.app-shell[data-theme="light"] .scenario-summary-card div,
+.app-shell[data-theme="light"] .equity-chart text,
+.app-shell[data-theme="light"] .equity-chart-legend span { fill: #68737c; color: #68737c; }
+.app-shell[data-theme="light"] .equity-chart line { stroke: #dce1e5; }
+.app-shell[data-theme="light"] .backtest-scenario-tabs { color: #68737c; }
+.app-shell[data-theme="light"] .backtest-scenario-tabs button { border-color: #cbd2d8; color: #56616a; background: #fff; }
+.app-shell[data-theme="light"] .backtest-scenario-tabs button.is-active { border-color: #86b6da; color: #285c83; background: #edf6fc; }
 .app-shell[data-theme="light"] .symbol-field > label { color: #424b53; }
 .app-shell[data-theme="light"] .symbol-results-panel { border-color: #d8dde2; background: #f8f9fa; }
 .app-shell[data-theme="light"] .symbol-results-heading { color: #48545d; }
@@ -531,3 +561,4 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .theme-options button.is-selected { color: #20262b; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 13%); }
 @media (max-width: 640px) { .settings-layout { grid-template-columns: 1fr; gap: 12px; margin-top: 20px; } .settings-nav { display: flex; } .settings-preference-row { align-items: flex-start; flex-direction: column; } }
 @media (max-width: 640px) { .backtest-settings-fields { grid-template-columns: 1fr; } .backtest-settings-summary { display: none; } }
+@media (max-width: 760px) { .scenario-summary-list { grid-template-columns: 1fr; } }

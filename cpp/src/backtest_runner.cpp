@@ -183,6 +183,13 @@ DATE_FORMAT parse_date_format(const std::string& value) {
     throw std::invalid_argument("Unsupported date format for data feed.");
 }
 
+TRADE_DIRECTION_MODE parse_direction_mode(const std::string& value) {
+    if (value == "BOTH") return TRADE_DIRECTION_MODE::BOTH;
+    if (value == "LONG_ONLY") return TRADE_DIRECTION_MODE::LONG_ONLY;
+    if (value == "SHORT_ONLY") return TRADE_DIRECTION_MODE::SHORT_ONLY;
+    throw std::invalid_argument("Unsupported trade direction mode.");
+}
+
 void print_equity_curve(const std::vector<double>& curve) {
     std::cout << '[';
     for (std::size_t i = 0; i < curve.size(); ++i) {
@@ -241,7 +248,7 @@ void print_results(const BacktestRunResults& results, std::size_t input_rows) {
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 7 || std::string(argv[1]) != "--run-plan") {
+        if (argc < 8 || std::string(argv[1]) != "--run-plan") {
             throw std::invalid_argument("Invalid runner arguments.");
         }
         int argument_index = 2;
@@ -249,6 +256,7 @@ int main(int argc, char** argv) {
         const double cost_bps = std::stod(argv[argument_index++]);
         const std::string allocation_mode = argv[argument_index++];
         const double fill_latency_seconds = std::stod(argv[argument_index++]);
+        const auto direction_mode = parse_direction_mode(argv[argument_index++]);
         const auto bucket_count = static_cast<std::size_t>(std::stoull(argv[argument_index++]));
         if (bucket_count == 0) throw std::invalid_argument("A backtest plan needs at least one bucket.");
 
@@ -257,6 +265,7 @@ int main(int argc, char** argv) {
         else if (allocation_mode == "EQUAL_PER_STRATEGY") config.capital_allocation = CAPITAL_ALLOCATION_MODE::EQUAL_PER_STRATEGY;
         else throw std::invalid_argument("Unsupported capital allocation mode.");
         config.fill_latency_seconds = fill_latency_seconds;
+        config.direction_mode = direction_mode;
 
         const auto require_arguments = [&](std::size_t count) {
             if (count > static_cast<std::size_t>(argc - argument_index)) {

@@ -80,9 +80,10 @@ function loadBacktestSettings() {
       cost_bps: Number.isFinite(Number(saved.cost_bps)) ? Number(saved.cost_bps) : 0,
       fill_latency_seconds: Number.isFinite(Number(saved.fill_latency_seconds)) ? Number(saved.fill_latency_seconds) : 0,
       capital_allocation: saved.capital_allocation === 'EQUAL_PER_STRATEGY' ? 'EQUAL_PER_STRATEGY' : 'SHARED',
+      run_mode: ['BOTH', 'LONG_ONLY', 'SHORT_ONLY', 'COMPARE_ALL'].includes(saved.run_mode) ? saved.run_mode : 'BOTH',
     }
   } catch {
-    return { initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED' }
+    return { initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', run_mode: 'BOTH' }
   }
 }
 
@@ -250,12 +251,59 @@ function BacktestSettingsPanel({ open, draft, onToggle, onChange, onSave, onCanc
           <label className="config-field"><span>Transaction cost (bps)</span><input min="0" onChange={(event) => onChange('cost_bps', event.target.value)} step="0.1" type="number" value={draft.cost_bps} /></label>
           <label className="config-field"><span>Fill latency (seconds)</span><input min="0" onChange={(event) => onChange('fill_latency_seconds', event.target.value)} step="0.001" type="number" value={draft.fill_latency_seconds} /><small>Used for quote/tick data. OHLCV backtests fill at the next bar open.</small></label>
           <label className="config-field"><span>Strategy capital</span><select onChange={(event) => onChange('capital_allocation', event.target.value)} value={draft.capital_allocation}><option value="SHARED">Shared within each bucket</option><option value="EQUAL_PER_STRATEGY">Split evenly per strategy</option></select></label>
+          <label className="config-field"><span>Trade directions</span><select onChange={(event) => onChange('run_mode', event.target.value)} value={draft.run_mode}><option value="BOTH">Both allowed</option><option value="LONG_ONLY">Long only</option><option value="SHORT_ONLY">Short only</option><option value="COMPARE_ALL">Compare all three</option></select><small>Compare runs Both, Long only, and Short only independently.</small></label>
         </div>
         <div className="backtest-settings-panel-actions">
           <button className="secondary-button" onClick={onCancel} type="button">Cancel</button>
           <button className="primary-button" disabled={Number(draft.initial_capital) <= 0 || Number(draft.cost_bps) < 0 || Number(draft.fill_latency_seconds) < 0} onClick={onSave} type="button">Save settings</button>
         </div>
       </div>}
+    </section>
+  )
+}
+
+function EquityCurveChart({ scenarios }) {
+  const colors = { both: '#77b9f2', long_only: '#6dc792', short_only: '#e29b7b' }
+  const series = scenarios.map((scenario) => {
+    const curve = scenario.equityCurve || []
+    const initial = scenario.metrics?.initialEquity || 1
+    const stride = Math.max(1, Math.ceil(curve.length / 600))
+    const values = curve.filter((_, index) => index % stride === 0 || index === curve.length - 1).map((equity) => ((equity / initial) - 1) * 100)
+    return { id: scenario.scenarioId || 'both', label: scenario.scenarioLabel || 'Backtest', values }
+  }).filter((item) => item.values.length)
+  if (!series.length) return null
+
+  const allValues = series.flatMap((item) => item.values)
+  let minimum = Math.min(0, ...allValues)
+  let maximum = Math.max(0, ...allValues)
+  if (minimum === maximum) { minimum -= 1; maximum += 1 }
+  const padding = (maximum - minimum) * 0.08
+  minimum -= padding
+  maximum += padding
+  const width = 760
+  const height = 230
+  const left = 54
+  const right = 12
+  const top = 14
+  const bottom = 27
+  const plotWidth = width - left - right
+  const plotHeight = height - top - bottom
+  const yFor = (value) => top + ((maximum - value) / (maximum - minimum)) * plotHeight
+  const xFor = (index, length) => left + (length <= 1 ? plotWidth / 2 : (index / (length - 1)) * plotWidth)
+  const guides = [maximum, (maximum + minimum) / 2, minimum]
+
+  return (
+    <section aria-label="Backtest equity curve" className="equity-chart-card">
+      <div className="config-section-heading"><h3>Equity curves</h3><span>Return from starting capital</span></div>
+      <svg aria-label="Equity curve return comparison" className="equity-chart" role="img" viewBox={`0 0 ${width} ${height}`}>
+        {guides.map((value, index) => <g key={index}><line x1={left} x2={width - right} y1={yFor(value)} y2={yFor(value)} /><text x={left - 8} y={yFor(value) + 4} textAnchor="end">{value.toFixed(1)}%</text></g>)}
+        <text className="equity-chart-start" x={left} y={height - 5}>Start</text><text className="equity-chart-end" x={width - right} y={height - 5} textAnchor="end">End</text>
+        {series.map((item) => {
+          const points = item.values.map((value, index) => `${xFor(index, item.values.length)},${yFor(value)}`).join(' ')
+          return <polyline key={item.id} points={points} style={{ '--curve-color': colors[item.id] || '#77b9f2' }} />
+        })}
+      </svg>
+      <div className="equity-chart-legend">{series.map((item) => <span key={item.id} style={{ '--curve-color': colors[item.id] || '#77b9f2' }}><i />{item.label}</span>)}</div>
     </section>
   )
 }
@@ -407,6 +455,7 @@ function App() {
   const compileNoticeClearTimer = useRef(null)
   const [isSidebarResizing, setIsSidebarResizing] = useState(false)
   const [backtestResult, setBacktestResult] = useState(null)
+  const [activeBacktestScenarioId, setActiveBacktestScenarioId] = useState('both')
   const [backtestError, setBacktestError] = useState('')
   const [isRunningBacktest, setIsRunningBacktest] = useState(false)
   const [backtestSettingsOpen, setBacktestSettingsOpen] = useState(false)
@@ -692,6 +741,7 @@ function App() {
       cost_bps: Number(backtestSettingsDraft.cost_bps),
       fill_latency_seconds: Number(backtestSettingsDraft.fill_latency_seconds),
       capital_allocation: backtestSettingsDraft.capital_allocation,
+      run_mode: backtestSettingsDraft.run_mode,
     })
     setBacktestSettingsOpen(false)
   }
@@ -1100,6 +1150,7 @@ function App() {
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Backtest failed.')
       setBacktestResult(result)
+      setActiveBacktestScenarioId(result.scenarios?.[0]?.scenarioId || result.scenarioId || 'both')
     } catch (error) {
       setBacktestError(error.message)
     } finally {
@@ -1119,6 +1170,9 @@ function App() {
   const hasProjectSidebar = isBuilder || isGridSearch || isSimpleBacktesting || isDataDownload || isYahooFinance
   const selectedStrategies = strategyCatalog.filter((strategy) => compileSelection[strategy.id])
   const yahooToday = localDateString(new Date())
+  const resultScenarios = backtestResult?.scenarios || (backtestResult ? [backtestResult] : [])
+  const activeBacktestReport = resultScenarios.find((scenario) => scenario.scenarioId === activeBacktestScenarioId) || resultScenarios[0]
+  const compareBacktestReports = backtestResult?.runMode === 'COMPARE_ALL'
   const yahooFilenamePreview = yahooFilenameTemplate
     .replaceAll('{name}', selectedYahooInstruments[0]?.symbol || 'AAPL')
     .replaceAll('{symbol}', selectedYahooInstruments[0]?.symbol || 'AAPL')
@@ -1394,21 +1448,38 @@ function App() {
               )}
               {backtestError && <p className="form-error">{backtestError}</p>}
               <button className="primary-button run-backtest-button" disabled={!compilation.current || backtestStrategies.length === 0 || dataFiles.length === 0 || backtestStrategies.some((strategy) => strategy.feedIds.length === 0) || isRunningBacktest} type="submit">
-                {isRunningBacktest ? 'Running bucketed C++ backtest…' : 'Run backtest'}
+                {isRunningBacktest ? (backtestConfig.run_mode === 'COMPARE_ALL' ? 'Running 3 independent scenarios…' : 'Running bucketed C++ backtest…') : 'Run backtest'}
               </button>
             </form>
 
             {backtestResult && (
               <section className="backtest-results">
-                <div className="config-section-heading"><h2>Run results</h2><span>{backtestResult.buckets.length} buckets · {backtestResult.inputRows.toLocaleString()} feed rows processed</span></div>
-                <div className="result-metrics">
-                  <div><span>Final equity</span><strong>{backtestResult.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></div>
-                  <div><span>Return</span><strong>{backtestResult.metrics.returnPct.toFixed(2)}%</strong></div>
-                  <div><span>Max drawdown</span><strong>{backtestResult.metrics.maxDrawdownPct.toFixed(2)}%</strong></div>
-                  <div><span>Orders</span><strong>{backtestResult.metrics.orders}</strong></div>
-                </div>
+                <div className="config-section-heading"><h2>Run results</h2><span>{activeBacktestReport.buckets.length} buckets · {backtestResult.inputRows.toLocaleString()} feed rows per scenario</span></div>
+                {compareBacktestReports ? (
+                  <div className="scenario-summary-list">
+                    {resultScenarios.map((scenario) => <article className="scenario-summary-card" key={scenario.scenarioId} style={{ '--curve-color': scenario.scenarioId === 'both' ? '#77b9f2' : scenario.scenarioId === 'long_only' ? '#6dc792' : '#e29b7b' }}>
+                      <h3>{scenario.scenarioLabel}</h3>
+                      <div><span>Final equity</span><strong>{scenario.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></div>
+                      <div><span>Return</span><strong>{scenario.metrics.returnPct.toFixed(2)}%</strong></div>
+                      <div><span>Max drawdown</span><strong>{scenario.metrics.maxDrawdownPct.toFixed(2)}%</strong></div>
+                      <div><span>Orders</span><strong>{scenario.metrics.orders}</strong></div>
+                    </article>)}
+                  </div>
+                ) : (
+                  <div className="result-metrics">
+                    <div><span>Final equity</span><strong>{activeBacktestReport.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></div>
+                    <div><span>Return</span><strong>{activeBacktestReport.metrics.returnPct.toFixed(2)}%</strong></div>
+                    <div><span>Max drawdown</span><strong>{activeBacktestReport.metrics.maxDrawdownPct.toFixed(2)}%</strong></div>
+                    <div><span>Orders</span><strong>{activeBacktestReport.metrics.orders}</strong></div>
+                  </div>
+                )}
+                <EquityCurveChart scenarios={compareBacktestReports ? resultScenarios : [activeBacktestReport]} />
+                {compareBacktestReports && <div className="backtest-scenario-tabs" aria-label="Choose scenario details">
+                  <span>Show bucket and order details:</span>
+                  {resultScenarios.map((scenario) => <button aria-pressed={activeBacktestReport.scenarioId === scenario.scenarioId} className={activeBacktestReport.scenarioId === scenario.scenarioId ? 'is-active' : ''} key={scenario.scenarioId} onClick={() => setActiveBacktestScenarioId(scenario.scenarioId)} type="button">{scenario.scenarioLabel}</button>)}
+                </div>}
                 <div className="bucket-result-list">
-                  {backtestResult.buckets.map((bucket) => <article className="bucket-result-card" key={bucket.id}>
+                  {activeBacktestReport.buckets.map((bucket) => <article className="bucket-result-card" key={bucket.id}>
                     <div className="config-section-heading"><h3>{backtestBuckets.find((item) => item.id === bucket.id)?.name || bucket.id}</h3><span>{bucket.strategies.length} strategies · {bucket.feeds.length} feeds</span></div>
                     <div className="bucket-result-details">
                       <span>Equity <strong>{bucket.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></span>
@@ -1420,7 +1491,7 @@ function App() {
                 </div>
                 <div className="orders-table-wrap">
                   <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy instance</th><th>Feed</th><th>Time (epoch ms)</th><th>Side</th><th>Quantity</th><th>Price</th><th>Status</th></tr></thead>
-                    <tbody>{backtestResult.orders.length ? backtestResult.orders.map((order) => <tr key={`${order.bucketId}-${order.instanceId}-${order.id}-${order.timestamp}`}><td>{backtestBuckets.find((item) => item.id === order.bucketId)?.name || order.bucketId}</td><td>{order.strategyName} · {order.instanceId}</td><td>{order.feedId || "—"}</td><td>{order.timestamp}</td><td>{order.signal}</td><td>{order.quantity}</td><td>{order.price.toFixed(4)}</td><td>{order.status}</td></tr>) : <tr><td colSpan="8">No orders were generated for this data and configuration.</td></tr>}</tbody>
+                    <tbody>{activeBacktestReport.orders.length ? activeBacktestReport.orders.map((order) => <tr key={`${order.bucketId}-${order.instanceId}-${order.id}-${order.timestamp}`}><td>{backtestBuckets.find((item) => item.id === order.bucketId)?.name || order.bucketId}</td><td>{order.strategyName} · {order.instanceId}</td><td>{order.feedId || "—"}</td><td>{order.timestamp}</td><td>{order.signal}</td><td>{order.quantity}</td><td>{order.price.toFixed(4)}</td><td>{order.status}</td></tr>) : <tr><td colSpan="8">No orders were generated for this data and configuration.</td></tr>}</tbody>
                   </table>
                 </div>
               </section>
