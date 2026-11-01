@@ -241,6 +241,25 @@ void test_equal_capital_is_split_across_all_buckets() {
     assert(std::abs(result.equity_curve.back() - 1'000.0) < 1e-9);
 }
 
+void test_currency_conversion_applies_to_cash_and_mark_to_market() {
+    auto entry = bar(10, 10, 10, 10, 10);
+    auto mark = bar(20, 10, 12, 10, 12);
+    const std::vector<OHLCVEvent> bars{entry, mark};
+    const std::vector<double> account_currency_rates{1.2, 1.3};
+    BuyOnceStrategy strategy(1.0);
+    const BacktestBucket<OHLCVEvent> bucket{
+        .id = "fx-test",
+        .feeds = {{"default", bars, account_currency_rates}},
+        .strategies = {{"buy-once", &strategy, {"default"}, {}}},
+    };
+    const auto result = Backtester<OHLCVEvent>({.initial_capital = 100.0, .cost_bps = 0.0}).run(bucket);
+    const auto& orders = result.strategies.front().results.hlog;
+    assert(orders.size() == 1);
+    assert(orders[0].status == ORDER_STATUS::FILLED);
+    assert(std::abs(orders[0].price - 10.0) < 1e-9);
+    assert(std::abs(result.equity_curve.back() - 102.6) < 1e-9);
+}
+
 void test_multi_feed_order_executes_on_its_target_feed() {
     const std::vector<OHLCVEvent> a{bar(10, 10, 10, 10, 10)};
     const std::vector<OHLCVEvent> b{bar(20, 20, 20, 20, 20), bar(30, 21, 21, 21, 21)};
@@ -366,6 +385,7 @@ int main() {
     test_equal_capital_sleeves();
     test_plan_shares_capital_and_timeline_across_buckets();
     test_equal_capital_is_split_across_all_buckets();
+    test_currency_conversion_applies_to_cash_and_mark_to_market();
     test_multi_feed_order_executes_on_its_target_feed();
     test_quote_execution_uses_bid_ask();
     test_quote_latency_delays_entry_and_stop_fills();

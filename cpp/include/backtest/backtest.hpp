@@ -25,6 +25,17 @@ template <typename Tin>
 struct BacktestFeed {
     std::string id;
     std::span<const Tin> events;
+    // Backtester-owned conversion rates aligned to events; strategies only receive Tin.
+    std::span<const double> account_currency_rates;
+
+    BacktestFeed() = default;
+    BacktestFeed(std::string feed_id, std::span<const Tin> market_events,
+                 std::span<const double> conversion_rates = {})
+        : id(std::move(feed_id)), events(market_events), account_currency_rates(conversion_rates) {}
+
+    double account_currency_rate(std::size_t event_index) const {
+        return account_currency_rates.empty() ? 1.0 : account_currency_rates[event_index];
+    }
 };
 
 template <typename Tin>
@@ -97,7 +108,7 @@ struct BacktestEventTraits<OHLCVEvent> {
     }
     static double buy_price(const OHLCVEvent& event) { return event.open; }
     static double sell_price(const OHLCVEvent& event) { return event.open; }
-    static double mark_price(const OHLCVEvent& event, double) { return event.close; }
+    static double mark_price(const OHLCVEvent& event, double, double account_currency_rate) { return event.close * account_currency_rate; }
     static bool stop_hit(const OHLCVEvent& event, SIGNAL side, double stop) {
         return side == SIGNAL::LONG ? event.low <= stop : event.high >= stop;
     }
@@ -118,7 +129,7 @@ struct BacktestEventTraits<QuoteEvent> {
     }
     static double buy_price(const QuoteEvent& event) { return event.ask; }
     static double sell_price(const QuoteEvent& event) { return event.bid; }
-    static double mark_price(const QuoteEvent& event, double position) {
+    static double mark_price(const QuoteEvent& event, double position, double) {
         if (position > 0.0) return event.bid;
         if (position < 0.0) return event.ask;
         return (event.bid + event.ask) / 2.0;
@@ -197,12 +208,19 @@ public:
             if (feed.id.empty() || !feed_indices.emplace(feed.id, i).second) {
                 throw std::invalid_argument("Feed IDs in a bucket must be non-empty and unique.");
             }
+            if (!feed.account_currency_rates.empty() && feed.account_currency_rates.size() != feed.events.size()) {
+                throw std::invalid_argument("Feed '" + feed.id + "' must have one backtester currency rate per event.");
+            }
             for (std::size_t j = 0; j < feed.events.size(); ++j) {
                 if (!BacktestEventTraits<Tin>::valid(feed.events[j])) {
                     throw std::invalid_argument("Feed '" + feed.id + "' contains invalid market data at event " + std::to_string(j + 1) + ".");
                 }
                 if (j > 0 && BacktestEventTraits<Tin>::timestamp(feed.events[j]) < BacktestEventTraits<Tin>::timestamp(feed.events[j - 1])) {
                     throw std::invalid_argument("Feed '" + feed.id + "' must be sorted by timestamp.");
+                }
+                if (!feed.account_currency_rates.empty() &&
+                    (!std::isfinite(feed.account_currency_rates[j]) || feed.account_currency_rates[j] <= 0.0)) {
+                    throw std::invalid_argument("Feed '" + feed.id + "' has an invalid backtester currency rate at event " + std::to_string(j + 1) + ".");
                 }
             }
         }
@@ -341,6 +359,7 @@ public:
                     auto& lots = state.open_lots[feed.id];
                     auto& history = state.results.hlog;
                     auto& waiting = state.pending[feed.id];
+                    const double account_currency_rate = feed.account_currency_rate(cursor.event_index);
                     std::vector<OrderEvent> ready_orders;
                     std::vector<long long> ready_stop_lots;
                     for (auto order = waiting.begin(); order != waiting.end();) {
@@ -356,14 +375,14 @@ public:
                         ? shared_cash
                         : state.cash;
                     const double cash_before_execution = cash;
-                    execute_orders(ready_orders, event, timestamp,
+                    execute_orders(ready_orders, event, account_currency_rate, timestamp,
                                    cash, position, lots, history, state.id_generator, *bucket.strategies[strategy_index].strategy);
                     for (const auto stop_lot_id : ready_stop_lots) state.pending_stop_lots.erase(stop_lot_id);
-                    execute_stop_losses(lots, event, timestamp, eligible_timestamp(timestamp), fill_latency_ms,
+                    execute_stop_losses(lots, event, account_currency_rate, timestamp, eligible_timestamp(timestamp), fill_latency_ms,
                                         waiting, state.pending_stop_lots, cash, position, history,
                                         state.id_generator, *bucket.strategies[strategy_index].strategy);
                     state.attribution_cash += cash - cash_before_execution;
-                    state.marks[feed.id] = BacktestEventTraits<Tin>::mark_price(event, position);
+                    state.marks[feed.id] = BacktestEventTraits<Tin>::mark_price(event, position, account_currency_rate);
                 }
             }
 
@@ -385,13 +404,13 @@ public:
                         feed_views.push_back({subscribed_feed.id, latest_events[subscribed_feed_index], position});
                     }
                     const auto current_lots = state.open_lots.find(feed.id);
-                    StrategyContext context{
-                        .opos = state.positions[feed.id],
-                        .equity = equity,
-                        .oposlog = current_lots == state.open_lots.end() ? std::vector<OrderEvent>{} : current_lots->second,
-                        .feed_id = feed.id,
-                        .feeds = feed_views,
-                    };
+                    StrategyContext context;
+                    context.opos = state.positions[feed.id];
+                    context.equity = equity;
+                    context.oposlog = current_lots == state.open_lots.end() ? std::vector<OrderEvent>{} : current_lots->second;
+                    context.feed_id = feed.id;
+                    context.feeds = feed_views;
+                    context.account_currency_per_native_unit_ = feed.account_currency_rate(cursor.event_index);
                     state.orders.clear();
                     binding.strategy->on_data(event, context, state.orders);
                     for (auto& order : state.orders) {
@@ -542,18 +561,20 @@ private:
         order.reason = reason;
     }
 
-    void fill_buy(OrderEvent& order, double price, double& cash, double& position) const {
-        const double fee = std::abs(price * order.qty) * config_.cost_bps / 10'000.0;
-        cash -= price * order.qty + fee;
+    void fill_buy(OrderEvent& order, double price, double currency_rate, double& cash, double& position) const {
+        const double base_notional = price * order.qty * currency_rate;
+        const double fee = std::abs(base_notional) * config_.cost_bps / 10'000.0;
+        cash -= base_notional + fee;
         position += order.qty;
         normalize_position(position);
         order.status = ORDER_STATUS::FILLED;
         order.price = price;
     }
 
-    void fill_sell(OrderEvent& order, double price, double& cash, double& position) const {
-        const double fee = std::abs(price * order.qty) * config_.cost_bps / 10'000.0;
-        cash += price * order.qty - fee;
+    void fill_sell(OrderEvent& order, double price, double currency_rate, double& cash, double& position) const {
+        const double base_notional = price * order.qty * currency_rate;
+        const double fee = std::abs(base_notional) * config_.cost_bps / 10'000.0;
+        cash += base_notional - fee;
         position -= order.qty;
         normalize_position(position);
         order.status = ORDER_STATUS::FILLED;
@@ -611,7 +632,7 @@ private:
         return has_percent ? percent_stop : notional_stop;
     }
 
-    void execute_stop_losses(std::vector<OrderEvent>& lots, const Tin& event, long long timestamp,
+    void execute_stop_losses(std::vector<OrderEvent>& lots, const Tin& event, double currency_rate, long long timestamp,
                              long long eligible_at, long long fill_latency_ms,
                              std::vector<PendingOrder>& pending, std::unordered_set<long long>& pending_stop_lots,
                              double& cash, double& position, std::vector<OrderEvent>& history,
@@ -649,17 +670,17 @@ private:
             exit_order.id = id_generator.next();
             if (it->signal == SIGNAL::LONG) {
                 exit_order.signal = SIGNAL::SELL;
-                fill_sell(exit_order, execution_price, cash, position);
+                fill_sell(exit_order, execution_price, currency_rate, cash, position);
             } else {
                 exit_order.signal = SIGNAL::COVER;
-                fill_buy(exit_order, execution_price, cash, position);
+                fill_buy(exit_order, execution_price, currency_rate, cash, position);
             }
             history.push_back(std::move(exit_order));
             it = lots.erase(it);
         }
     }
 
-    void execute_orders(std::vector<OrderEvent>& orders, const Tin& event, long long timestamp,
+    void execute_orders(std::vector<OrderEvent>& orders, const Tin& event, double currency_rate, long long timestamp,
                         double& cash, double& position, std::vector<OrderEvent>& lots,
                         std::vector<OrderEvent>& history, OrderIdGenerator& id_generator,
                         Strategy<Tin>& strategy) const {
@@ -687,8 +708,9 @@ private:
             }
             const bool forced_stop_exit = order.reason == "stop loss";
             if (is_buy && !forced_stop_exit) {
-                const double fee = std::abs(price * order.qty) * config_.cost_bps / 10'000.0;
-                if (price * order.qty + fee > cash) {
+                const double notional = price * order.qty * currency_rate;
+                const double fee = std::abs(notional) * config_.cost_bps / 10'000.0;
+                if (notional + fee > cash) {
                     reject(order, "insufficient shared or allocated cash");
                     history.push_back(order);
                     continue;
@@ -700,7 +722,7 @@ private:
                     if (!long_allowed || position < 0.0 || (!settings.stacking && position > 0.0)) {
                         reject(order, "long order not allowed"); history.push_back(order); break;
                     }
-                    fill_buy(order, price, cash, position);
+                    fill_buy(order, price, currency_rate, cash, position);
                     add_open_lot(lots, order, SIGNAL::LONG, order.qty);
                     history.push_back(order);
                     break;
@@ -708,7 +730,7 @@ private:
                     if (!short_allowed || position > 0.0 || (!settings.stacking && position < 0.0)) {
                         reject(order, "short order not allowed"); history.push_back(order); break;
                     }
-                    fill_sell(order, price, cash, position);
+                    fill_sell(order, price, currency_rate, cash, position);
                     add_open_lot(lots, order, SIGNAL::SHORT, order.qty);
                     history.push_back(order);
                     break;
@@ -716,14 +738,14 @@ private:
                     if (position <= 0.0 || order.qty > position) {
                         reject(order, "sell exceeds open long position"); history.push_back(order); break;
                     }
-                    fill_sell(order, price, cash, position);
+                    fill_sell(order, price, currency_rate, cash, position);
                     close_open_lots(lots, SIGNAL::LONG, order, history, id_generator);
                     break;
                 case SIGNAL::COVER:
                     if (position >= 0.0 || order.qty > -position) {
                         reject(order, "cover exceeds open short position"); history.push_back(order); break;
                     }
-                    fill_buy(order, price, cash, position);
+                    fill_buy(order, price, currency_rate, cash, position);
                     close_open_lots(lots, SIGNAL::SHORT, order, history, id_generator);
                     break;
                 case SIGNAL::BBUY: {
@@ -732,7 +754,7 @@ private:
                         reject(order, "buy order not allowed"); history.push_back(order); break;
                     }
                     const double previous_position = position;
-                    fill_buy(order, price, cash, position);
+                    fill_buy(order, price, currency_rate, cash, position);
                     if (previous_position < 0.0) {
                         OrderEvent cover = order;
                         cover.signal = SIGNAL::COVER;
@@ -757,7 +779,7 @@ private:
                         reject(order, "sell order not allowed"); history.push_back(order); break;
                     }
                     const double previous_position = position;
-                    fill_sell(order, price, cash, position);
+                    fill_sell(order, price, currency_rate, cash, position);
                     if (previous_position > 0.0) {
                         OrderEvent sell = order;
                         sell.signal = SIGNAL::SELL;

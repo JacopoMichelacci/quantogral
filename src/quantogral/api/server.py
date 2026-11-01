@@ -13,12 +13,14 @@ import subprocess
 import tempfile
 import threading
 import uuid
+import csv
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from quantogral.data.providers.yfinance import DataAlreadyExistsError, download_yahoo_history, search_yahoo_symbols
 
@@ -29,9 +31,13 @@ DEFAULT_BACKTEST_SETTINGS = {
     "fill_latency_seconds": 0,
     "capital_allocation": "SHARED",
     "run_mode": "BOTH",
+    "base_currency": "USD",
+    "ignore_currency": False,
 }
 PROJECT_ROOT = Path(os.environ.get("QUANTOGRAL_ROOT", Path(__file__).resolve().parents[3]))
 CONFIG_PATH = PROJECT_ROOT / ".quantogral" / "config.json"
+DATASET_SETTINGS_PATH = PROJECT_ROOT / ".quantogral" / "dataset-settings.json"
+STRATEGY_PRESETS_PATH = PROJECT_ROOT / ".quantogral" / "strategy-presets.json"
 CPP_ROOT = PROJECT_ROOT / "cpp"
 RUNNER_SOURCE = CPP_ROOT / "src" / "backtest_runner.cpp"
 CORE_SOURCES = [CPP_ROOT / "src" / "core" / "market_events.cpp", CPP_ROOT / "src" / "core" / "order_events.cpp"]
@@ -253,7 +259,133 @@ def read_config() -> tuple[dict[str, Any], bool]:
         backtest["capital_allocation"] = saved_backtest["capital_allocation"]
     if saved_backtest.get("run_mode") in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
         backtest["run_mode"] = saved_backtest["run_mode"]
+    base_currency = saved_backtest.get("base_currency")
+    if isinstance(base_currency, str) and re.fullmatch(r"[A-Z]{3}", base_currency):
+        backtest["base_currency"] = base_currency
+    if isinstance(saved_backtest.get("ignore_currency"), bool):
+        backtest["ignore_currency"] = saved_backtest["ignore_currency"]
     return {"builder": {"path": builder_path}, "backtest": backtest}, configured
+
+
+def read_local_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as source:
+            value = json.load(source)
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_local_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as output:
+        json.dump(value, output, indent=2)
+        output.write("\n")
+        temporary_path = Path(output.name)
+    temporary_path.chmod(0o600)
+    temporary_path.replace(path)
+
+
+def infer_embedded_timezone(path: Path) -> str | None:
+    """Recognize explicit UTC markers; non-UTC offsets are still honored by the timestamp parser."""
+    try:
+        if path.suffix.lower() in {".parquet", ".pq"}:
+            import polars as pl
+            frame = pl.read_parquet(path, n_rows=1)
+            candidates = [name for name in frame.columns if "".join(ch for ch in name.lower() if ch.isalnum()) in {"timestamp", "timestamps", "ts", "time", "date", "datetime", "epoch"}]
+            value = str(frame[candidates[0]][0]) if candidates and frame.height else ""
+        else:
+            with path.open("r", encoding="utf-8-sig") as source:
+                first = source.readline()
+                second = source.readline()
+            value = second.split(",", 1)[0].strip().strip('"') if first and any(token in first.lower() for token in ("timestamp", "date", "datetime", "time")) else first.split(",", 1)[0].strip().strip('"')
+        if re.search(r"(?:Z|\+00:?00)$", value, flags=re.IGNORECASE):
+            return "UTC"
+    except Exception:
+        return None
+    return None
+
+
+def dataset_settings(path: str) -> dict[str, Any]:
+    saved = read_local_json(DATASET_SETTINGS_PATH).get(path)
+    if isinstance(saved, dict):
+        return {"path": path, "timezone": saved.get("timezone", "UTC"),
+                "currency": saved.get("currency") or "USD",
+                "fxBaseCurrency": saved.get("fxBaseCurrency", saved.get("baseCurrency", "")),
+                "fxQuoteCurrency": saved.get("fxQuoteCurrency", saved.get("quoteCurrency", "")),
+                "timezoneSource": "user", "currencySource": "user"}
+    inferred_timezone = infer_embedded_timezone(PROJECT_ROOT / "data" / path)
+    timezone = inferred_timezone or "UTC"
+    return {"path": path, "timezone": timezone, "currency": "USD", "fxBaseCurrency": "", "fxQuoteCurrency": "",
+            "timezoneSource": "embedded" if inferred_timezone else "default", "currencySource": "default"}
+
+
+def save_dataset_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    relative_path = payload.get("path")
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise WorkspaceItemError("Choose a data file to configure.")
+    target = safe_workspace_path(PROJECT_ROOT / "data", relative_path)
+    if not target.is_file() or target.suffix.lower() not in {".csv", ".parquet", ".pq"}:
+        raise WorkspaceItemError("Dataset settings are available for CSV and Parquet files.")
+    timezone_name = payload.get("timezone", "UTC")
+    currency = payload.get("currency", "USD")
+    fx_base_currency = payload.get("fxBaseCurrency", payload.get("baseCurrency", ""))
+    fx_quote_currency = payload.get("fxQuoteCurrency", payload.get("quoteCurrency", ""))
+    if not isinstance(timezone_name, str) or not timezone_name.strip():
+        raise WorkspaceItemError("Enter the dataset timezone.")
+    try:
+        ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError) as error:
+        raise WorkspaceItemError("Enter a valid IANA timezone, such as America/New_York.") from error
+    if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
+        raise WorkspaceItemError("Choose a three-letter asset currency code, such as USD.")
+    pair_codes_valid = all(code == "" or isinstance(code, str) and re.fullmatch(r"[A-Z]{3}", code) for code in (fx_base_currency, fx_quote_currency))
+    if not pair_codes_valid or fx_base_currency and fx_quote_currency and fx_base_currency == fx_quote_currency:
+        raise WorkspaceItemError("FX history needs two different three-letter currency codes.")
+    settings = {"timezone": timezone_name, "currency": currency,
+                "fxBaseCurrency": fx_base_currency, "fxQuoteCurrency": fx_quote_currency}
+    all_settings = read_local_json(DATASET_SETTINGS_PATH)
+    all_settings[relative_path] = settings
+    write_local_json(DATASET_SETTINGS_PATH, all_settings)
+    return {"path": relative_path, **settings, "timezoneSource": "user", "currencySource": "user"}
+
+
+def get_strategy_presets(strategy_id: str) -> dict[str, Any]:
+    if strategy_id not in eligible_strategy_headers():
+        raise WorkspaceItemError("The selected strategy is not currently discovered.", HTTPStatus.NOT_FOUND)
+    saved = read_local_json(STRATEGY_PRESETS_PATH).get(strategy_id, {})
+    if not isinstance(saved, dict):
+        saved = {}
+    return {"strategyId": strategy_id, "presets": saved.get("presets", []), "lastPresetId": saved.get("lastPresetId")}
+
+
+def save_strategy_presets(payload: dict[str, Any]) -> dict[str, Any]:
+    strategy_id = payload.get("strategyId")
+    if not isinstance(strategy_id, str) or strategy_id not in eligible_strategy_headers():
+        raise WorkspaceItemError("The selected strategy is not currently discovered.", HTTPStatus.NOT_FOUND)
+    presets = payload.get("presets")
+    last_preset_id = payload.get("lastPresetId")
+    if not isinstance(presets, list):
+        raise WorkspaceItemError("Presets must be provided as a list.")
+    normalized = []
+    seen_ids = set()
+    for preset in presets:
+        if not isinstance(preset, dict):
+            raise WorkspaceItemError("Each preset must be an object.")
+        preset_id, name = preset.get("id"), preset.get("name")
+        config, fields = preset.get("config"), preset.get("fields")
+        if not isinstance(preset_id, str) or not preset_id or preset_id in seen_ids or not isinstance(name, str) or not name.strip():
+            raise WorkspaceItemError("Each preset needs a unique ID and a non-empty name.")
+        if len(name) > 80 or not isinstance(config, dict) or not isinstance(fields, dict):
+            raise WorkspaceItemError("Preset names are limited to 80 characters and need valid config and field definitions.")
+        seen_ids.add(preset_id)
+        normalized.append({"id": preset_id, "name": name.strip(), "config": config, "fields": fields})
+    if last_preset_id is not None and last_preset_id not in seen_ids:
+        raise WorkspaceItemError("The selected last preset is not in this preset list.")
+    all_presets = read_local_json(STRATEGY_PRESETS_PATH)
+    all_presets[strategy_id] = {"presets": normalized, "lastPresetId": last_preset_id}
+    write_local_json(STRATEGY_PRESETS_PATH, all_presets)
+    return {"strategyId": strategy_id, "presets": normalized, "lastPresetId": last_preset_id}
 
 
 def write_config(builder_path: str) -> None:
@@ -535,6 +667,19 @@ def rename_workspace_item(payload: dict[str, Any]) -> dict[str, str]:
         source.rename(target)
     except FileExistsError as error:
         raise WorkspaceItemError("An item with that name already exists.", HTTPStatus.CONFLICT) from error
+    if payload.get("scope") == "data":
+        saved_settings = read_local_json(DATASET_SETTINGS_PATH)
+        prefix = relative_path.rstrip("/")
+        updates = {}
+        for old_path, settings in saved_settings.items():
+            if old_path == prefix or (is_directory and old_path.startswith(prefix + "/")):
+                updates[name + old_path[len(prefix):]] = settings
+        if updates:
+            for old_path in list(saved_settings):
+                if old_path == prefix or (is_directory and old_path.startswith(prefix + "/")):
+                    del saved_settings[old_path]
+            saved_settings.update(updates)
+            write_local_json(DATASET_SETTINGS_PATH, saved_settings)
     return {"name": name, "type": "directory" if is_directory else "file"}
 
 
@@ -549,6 +694,11 @@ def delete_workspace_file(payload: dict[str, Any]) -> dict[str, str]:
         target.unlink()
     except OSError as error:
         raise WorkspaceItemError(f"Could not delete {target.name}: {error}", HTTPStatus.INTERNAL_SERVER_ERROR) from error
+    if payload.get("scope") == "data":
+        saved_settings = read_local_json(DATASET_SETTINGS_PATH)
+        if relative_path in saved_settings:
+            del saved_settings[relative_path]
+            write_local_json(DATASET_SETTINGS_PATH, saved_settings)
     return {"name": target.name, "type": "file"}
 
 
@@ -612,39 +762,196 @@ def resolve_data_file(raw_path: Any) -> Path:
     return path
 
 
-def prepare_parquet_csv(source: Path, destination: Path) -> None:
-    """Convert a Parquet OHLCV table to the runner's timestamp/OHLCV CSV format."""
+def _read_ohlcv_frame(source: Path):
     try:
         import polars as pl
     except ImportError as error:
-        raise RuntimeError("Parquet support needs the project's Python dependencies. Run `uv sync` and restart Quantogral.") from error
-
-    frame = pl.read_parquet(source)
-    if frame.width < 6:
-        raise ValueError("Parquet data must contain at least six columns: timestamp, open, high, low, close, and volume.")
-
+        raise RuntimeError("Timezone-aware backtests need Polars. Run `uv sync` and restart Quantogral.") from error
+    is_parquet = source.suffix.lower() in {".parquet", ".pq"}
+    frame = pl.read_parquet(source) if is_parquet else pl.read_csv(source, infer_schema_length=10000, try_parse_dates=True)
     aliases = {
         "timestamp": {"timestamp", "timestamps", "ts", "time", "date", "datetime", "epoch"},
-        "open": {"open", "o"},
-        "high": {"high", "h"},
-        "low": {"low", "l"},
-        "close": {"close", "c"},
-        "volume": {"volume", "vol", "v"},
+        "open": {"open", "o"}, "high": {"high", "h"}, "low": {"low", "l"},
+        "close": {"close", "c"}, "volume": {"volume", "vol", "v"},
     }
     by_normalized_name = {"".join(character for character in name.lower() if character.isalnum()): name for name in frame.columns}
-    selected_columns = []
-    for canonical, names in aliases.items():
-        original = next((by_normalized_name.get(name) for name in names if by_normalized_name.get(name)), None)
+    selected = []
+    for canonical, candidates in aliases.items():
+        original = next((by_normalized_name.get(candidate) for candidate in candidates if by_normalized_name.get(candidate)), None)
         if original is None:
-            selected_columns = []
+            selected = []
             break
-        selected_columns.append(pl.col(original).alias(canonical))
+        selected.append(original)
+    if not selected:
+        if not is_parquet:
+            frame = pl.read_csv(source, has_header=False, infer_schema_length=10000, try_parse_dates=True)
+        if frame.width < 6:
+            raise ValueError("Market data must contain timestamp, open, high, low, close, and volume columns.")
+        selected = frame.columns[:6]
+    return frame.select(selected).rename(dict(zip(selected, ["timestamp", "open", "high", "low", "close", "volume"])))
 
-    if selected_columns:
-        frame = frame.select(selected_columns)
-    else:
-        frame = frame.select(frame.columns[:6]).rename(dict(zip(frame.columns[:6], ["timestamp", "open", "high", "low", "close", "volume"])))
-    frame.write_csv(destination, include_header=True)
+
+def _read_fx_rate_frame(source: Path):
+    try:
+        import polars as pl
+    except ImportError as error:
+        raise RuntimeError("Timezone-aware backtests need Polars. Run `uv sync` and restart Quantogral.") from error
+    is_parquet = source.suffix.lower() in {".parquet", ".pq"}
+    frame = pl.read_parquet(source) if is_parquet else pl.read_csv(source, infer_schema_length=10000, try_parse_dates=True)
+    by_normalized_name = {"".join(ch for ch in name.lower() if ch.isalnum()): name for name in frame.columns}
+    timestamp = next((by_normalized_name.get(name) for name in ("timestamp", "timestamps", "ts", "time", "date", "datetime", "epoch") if by_normalized_name.get(name)), None)
+    rate = next((by_normalized_name.get(name) for name in ("close", "rate", "fxrate", "value", "price", "c") if by_normalized_name.get(name)), None)
+    if timestamp is None or rate is None:
+        if not is_parquet:
+            frame = pl.read_csv(source, has_header=False, infer_schema_length=10000, try_parse_dates=True)
+        if frame.width < 2:
+            raise ValueError("FX history needs timestamp and close/rate columns.")
+        timestamp, rate = frame.columns[:2]
+    return frame.select([pl.col(timestamp).alias("timestamp"), pl.col(rate).alias("rate")])
+
+
+def _market_timestamp_ms(value: Any, timezone_name: str, ts_unit: str, date_format: str) -> int:
+    if value is None:
+        raise ValueError("A market-data timestamp is empty.")
+    text = str(value).strip()
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text):
+        number = int(float(text))
+        factors = {"SECONDS": 1000, "MILLISECONDS": 1, "MICROSECONDS": 0.001, "NANOSECONDS": 0.000001}
+        return int(number * factors[ts_unit])
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        normalized = text.replace("/", "-")
+        formats = ["%d-%m-%Y", "%d-%m-%Y %H:%M:%S", "%m-%d-%Y", "%m-%d-%Y %H:%M:%S"]
+        if date_format == "MMDDYYYY":
+            formats = ["%m-%d-%Y", "%m-%d-%Y %H:%M:%S", "%d-%m-%Y", "%d-%m-%Y %H:%M:%S"]
+        parsed = None
+        for timestamp_format in formats:
+            try:
+                parsed = datetime.strptime(normalized, timestamp_format)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            raise ValueError(f"Could not parse timestamp {text!r} using {date_format}.")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+    return int(parsed.timestamp() * 1000)
+
+
+def _compress_fx_rates(rows: list[tuple[int, float]], first_asset_timestamp: int) -> tuple[list[tuple[int, float]], str, int]:
+    """Keep one causally timestamped FX close per UTC day or month, depending on source cadence."""
+    rows.sort(key=lambda item: item[0])
+    unique_rows = []
+    for timestamp, rate in rows:
+        if unique_rows and unique_rows[-1][0] == timestamp:
+            unique_rows[-1] = (timestamp, rate)
+        else:
+            unique_rows.append((timestamp, rate))
+    if not unique_rows:
+        raise ValueError("FX history contains no usable rows.")
+    gaps = [(right[0] - left[0]) / 86_400_000.0 for left, right in zip(unique_rows, unique_rows[1:])]
+    median_gap_days = statistics.median(gaps) if gaps else 1.0
+    resolution = "daily" if median_gap_days <= 4.0 else "monthly"
+    max_age_ms = (5 if resolution == "daily" else 45) * 86_400_000
+    compressed: dict[Any, tuple[int, float]] = {}
+    for row in unique_rows:
+        timestamp = row[0]
+        moment = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+        key = moment.date() if resolution == "daily" else (moment.year, moment.month)
+        compressed[key] = row
+    # Preserve the latest observation available at the first asset event,
+    # even if a later close from the same day/month is selected by downsampling.
+    prior_to_start = next((row for row in reversed(unique_rows) if row[0] <= first_asset_timestamp), None)
+    if prior_to_start is not None:
+        period = datetime.fromtimestamp(prior_to_start[0] / 1000, tz=timezone.utc)
+        key = period.date() if resolution == "daily" else (period.year, period.month)
+        if compressed[key][0] > first_asset_timestamp:
+            compressed[("start-boundary", prior_to_start[0])] = prior_to_start
+    return sorted(compressed.values(), key=lambda item: item[0]), resolution, max_age_ms
+
+
+def prepare_market_feed_csv(
+    source: Path, destination: Path, *, timezone_name: str, ts_unit: str, date_format: str,
+    fx_source: Path | None = None, fx_settings: dict[str, Any] | None = None,
+    asset_currency: str = "USD", base_currency: str = "USD",
+    fx_cache: dict[tuple[str, str, str, str, str], tuple[list[tuple[int, float]], str, int]] | None = None,
+) -> int:
+    """Normalize timestamps and append a covered, resolution-compressed as-of FX multiplier."""
+    if ts_unit not in {"SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"}:
+        raise ValueError("Choose a supported numeric timestamp unit.")
+    if date_format not in {"DDMMYYYY", "MMDDYYYY"}:
+        raise ValueError("Choose a supported date order.")
+    assets = _read_ohlcv_frame(source)
+    asset_rows = assets.rows()
+    parsed_assets = []
+    for row_number, row in enumerate(asset_rows, 1):
+        try:
+            parsed_assets.append((_market_timestamp_ms(row[0], timezone_name, ts_unit, date_format), row[1:]))
+        except Exception as error:
+            raise ValueError(f"Could not parse timestamp in {source.name}, row {row_number}: {error}") from error
+    parsed_assets.sort(key=lambda item: item[0])
+
+    fx_rows: list[tuple[int, float]] = []
+    fx_max_age_ms = 0
+    invert_rate = False
+    if fx_source is not None and fx_settings is not None:
+        pair_base = fx_settings.get("baseCurrency")
+        pair_quote = fx_settings.get("quoteCurrency")
+        if pair_base == asset_currency and pair_quote == base_currency:
+            invert_rate = False
+        elif pair_base == base_currency and pair_quote == asset_currency:
+            invert_rate = True
+        else:
+            raise ValueError(f"FX file {fx_source.name} must contain {asset_currency}/{base_currency} or {base_currency}/{asset_currency} history.")
+        first_asset_timestamp = parsed_assets[0][0] if parsed_assets else 0
+        cache_key = (str(fx_source.resolve()), fx_settings.get("timezone", "UTC"), fx_settings.get("tsUnit", "MILLISECONDS"), fx_settings.get("dateFormat", "DDMMYYYY"), str(first_asset_timestamp))
+        cached = fx_cache.get(cache_key) if fx_cache is not None else None
+        if cached is None:
+            fx_frame = _read_fx_rate_frame(fx_source)
+            raw_fx_rows = []
+            for row_number, row in enumerate(fx_frame.rows(), 1):
+                try:
+                    timestamp = _market_timestamp_ms(row[0], fx_settings.get("timezone", "UTC"), fx_settings.get("tsUnit", "MILLISECONDS"), fx_settings.get("dateFormat", "DDMMYYYY"))
+                    rate = float(row[1])
+                except Exception as error:
+                    raise ValueError(f"Could not read FX history {fx_source.name}, row {row_number}: {error}") from error
+                if not math.isfinite(rate) or rate <= 0:
+                    raise ValueError(f"FX file {fx_source.name}, row {row_number} has an invalid close rate.")
+                raw_fx_rows.append((timestamp, rate))
+            cached = _compress_fx_rates(raw_fx_rows, first_asset_timestamp)
+            if fx_cache is not None:
+                fx_cache[cache_key] = cached
+        fx_rows, resolution, fx_max_age_ms = cached
+        if parsed_assets and fx_rows[0][0] > parsed_assets[0][0]:
+            raise ValueError(f"FX history in {fx_source.name} starts after {source.name}; it does not cover the asset data start. Add earlier FX history.")
+        if parsed_assets and fx_rows[-1][0] < parsed_assets[-1][0]:
+            raise ValueError(f"FX history in {fx_source.name} ends before {source.name}; it does not cover the asset data end. Add later FX history.")
+
+    converted_rows = []
+    fx_index = 0
+    current_fx_rate = 1.0
+    for timestamp, values in parsed_assets:
+        if fx_rows:
+            while fx_index < len(fx_rows) and fx_rows[fx_index][0] <= timestamp:
+                current_fx_rate = fx_rows[fx_index][1]
+                fx_index += 1
+            if fx_index == 0:
+                raise ValueError(f"FX history in {fx_source.name} starts after {source.name}; earlier conversion rates are missing.")
+            if timestamp - fx_rows[fx_index - 1][0] > fx_max_age_ms:
+                allowed_gap_days = fx_max_age_ms // 86_400_000
+                raise ValueError(f"FX history in {fx_source.name} has a gap larger than the {allowed_gap_days}-day tolerance for {resolution} rates while covering {source.name} at {datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).isoformat()}.")
+            current_rate = 1.0 / current_fx_rate if invert_rate else current_fx_rate
+        else:
+            current_rate = 1.0
+        converted_rows.append((timestamp, *values, current_rate))
+
+    with destination.open("w", encoding="utf-8", newline="") as output:
+        writer = csv.writer(output)
+        writer.writerow(["timestamp", "open", "high", "low", "close", "volume", "currency_to_base"])
+        writer.writerows(converted_rows)
+    return len(converted_rows)
 
 
 def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
@@ -670,12 +977,18 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     initial_capital = float(value(backtest, "initial_capital", 100000))
     cost_bps = float(value(backtest, "cost_bps", 0))
     fill_latency_seconds = float(value(backtest, "fill_latency_seconds", 0))
+    base_currency = value(backtest, "base_currency", "USD")
+    ignore_currency = value(backtest, "ignore_currency", False)
     if not math.isfinite(initial_capital) or initial_capital <= 0:
         raise ValueError("Starting capital must be a finite number greater than zero.")
     if not math.isfinite(cost_bps) or cost_bps < 0:
         raise ValueError("Transaction cost must be a finite non-negative number of basis points.")
     if not math.isfinite(fill_latency_seconds) or fill_latency_seconds < 0:
         raise ValueError("Fill latency must be a finite non-negative number of seconds.")
+    if not isinstance(base_currency, str) or not re.fullmatch(r"[A-Z]{3}", base_currency):
+        raise ValueError("Set a three-letter portfolio currency in Backtest Settings.")
+    if not isinstance(ignore_currency, bool):
+        raise ValueError("Ignore currency must be enabled or disabled in Backtest Settings.")
     allocation_mode = value(backtest, "capital_allocation", "SHARED")
     if allocation_mode not in {"SHARED", "EQUAL_PER_STRATEGY"}:
         raise ValueError("Capital allocation must be SHARED or EQUAL_PER_STRATEGY.")
@@ -687,6 +1000,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, str(fill_latency_seconds), "BOTH", str(len(buckets))]
     temp_dirs: list[Any] = []
     prepared_buckets: list[dict[str, Any]] = []
+    fx_rate_cache: dict[tuple[str, str, str, str, str], tuple[list[tuple[int, float]], str, int]] = {}
     instance_ids: set[str] = set()
     bucket_ids: set[str] = set()
     try:
@@ -703,6 +1017,17 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             bucket_ids.add(bucket_id)
             if not isinstance(feeds, list) or not feeds or not isinstance(strategies, list) or not strategies:
                 raise ValueError(f"Bucket {bucket_id} needs at least one feed and one strategy.")
+            raw_fx_feeds = [] if ignore_currency else raw_bucket.get("fxFeeds", [])
+            if not isinstance(raw_fx_feeds, list):
+                raise ValueError(f"Bucket {bucket_id} has invalid FX history settings.")
+            available_fx = []
+            for fx_feed in raw_fx_feeds:
+                if not isinstance(fx_feed, dict):
+                    raise ValueError(f"Bucket {bucket_id} has an invalid FX history file.")
+                fx_path = resolve_data_file(fx_feed.get("path"))
+                fx_relative = fx_path.relative_to(PROJECT_ROOT / "data").as_posix()
+                fx_metadata = dataset_settings(fx_relative)
+                available_fx.append({"path": fx_path, "settings": {**fx_metadata, "tsUnit": fx_feed.get("tsUnit", "MILLISECONDS"), "dateFormat": fx_feed.get("dateFormat", "DDMMYYYY")}})
             arguments.extend([bucket_id, str(len(feeds))])
             prepared_feeds = []
             feed_ids: set[str] = set()
@@ -714,20 +1039,34 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"Bucket {bucket_id} data feed IDs must be non-empty and unique.")
                 feed_ids.add(feed_id)
                 data_path = resolve_data_file(feed.get("path"))
-                runner_data_path = data_path
-                if data_path.suffix.lower() in {".parquet", ".pq"}:
-                    temp_dir = tempfile.TemporaryDirectory(prefix="quantogral-parquet-", dir=BUILD_DIR)
-                    temp_dirs.append(temp_dir)
-                    runner_data_path = Path(temp_dir.name) / f"feed-{feed_index}.csv"
-                    prepare_parquet_csv(data_path, runner_data_path)
                 ts_unit = feed.get("tsUnit", "MILLISECONDS")
                 date_format = feed.get("dateFormat", "DDMMYYYY")
                 if ts_unit not in {"SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"}:
                     raise ValueError(f"Feed {feed_id} has an unsupported timestamp unit.")
                 if date_format not in {"DDMMYYYY", "MMDDYYYY"}:
                     raise ValueError(f"Feed {feed_id} has an unsupported date format.")
-                arguments.extend([feed_id, str(runner_data_path), ts_unit, date_format])
-                prepared_feeds.append({"id": feed_id, "path": str(data_path), "name": data_path.name, "tsUnit": ts_unit, "dateFormat": date_format})
+                relative_path = data_path.relative_to(PROJECT_ROOT / "data").as_posix()
+                metadata = dataset_settings(relative_path)
+                asset_currency = metadata["currency"]
+                selected_fx = None
+                if not ignore_currency and asset_currency != base_currency:
+                    selected_fx = next((item for item in available_fx if {item["settings"].get("fxBaseCurrency"), item["settings"].get("fxQuoteCurrency")} == {asset_currency, base_currency}), None)
+                    if selected_fx is None:
+                        raise ValueError(f"Bucket {bucket_id} needs user-provided FX history for {asset_currency}/{base_currency}. Add a matching FX file to this bucket.")
+                temp_dir = tempfile.TemporaryDirectory(prefix="quantogral-market-feed-", dir=BUILD_DIR)
+                temp_dirs.append(temp_dir)
+                runner_data_path = Path(temp_dir.name) / f"feed-{feed_index}.csv"
+                prepare_market_feed_csv(
+                    data_path, runner_data_path,
+                    timezone_name=metadata["timezone"], ts_unit=ts_unit, date_format=date_format,
+                    fx_source=selected_fx["path"] if selected_fx else None,
+                    fx_settings={**selected_fx["settings"], "baseCurrency": selected_fx["settings"].get("fxBaseCurrency"), "quoteCurrency": selected_fx["settings"].get("fxQuoteCurrency")} if selected_fx else None,
+                    asset_currency=asset_currency if not ignore_currency else base_currency,
+                    base_currency=base_currency,
+                    fx_cache=fx_rate_cache,
+                )
+                arguments.extend([feed_id, str(runner_data_path), "MILLISECONDS", "DDMMYYYY"])
+                prepared_feeds.append({"id": feed_id, "path": str(data_path), "name": data_path.name, "tsUnit": ts_unit, "dateFormat": date_format, "currency": asset_currency, "timezone": metadata["timezone"]})
 
             arguments.append(str(len(strategies)))
             prepared_strategies = []
@@ -820,8 +1159,10 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             quantity = float(order["quantity"])
             entry_price = float(entry["price"])
             exit_price = float(order["price"])
-            gross_profit = (exit_price - entry_price) * quantity if entry["side"] == "LONG" else (entry_price - exit_price) * quantity
-            fees = (abs(entry_price * quantity) + abs(exit_price * quantity)) * cost_bps / 10_000.0
+            entry_rate = float(entry.get("currencyRate", 1.0))
+            exit_rate = float(order.get("currencyRate", 1.0))
+            gross_profit = (exit_price * exit_rate - entry_price * entry_rate) * quantity if entry["side"] == "LONG" else (entry_price * entry_rate - exit_price * exit_rate) * quantity
+            fees = (abs(entry_price * entry_rate * quantity) + abs(exit_price * exit_rate * quantity)) * cost_bps / 10_000.0
             net_profit = gross_profit - fees
             stop_distances = []
             if entry.get("stopType") == "HARD":
@@ -831,7 +1172,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                     stop_distances.append(stop_notional)
                 if stop_percent > 0:
                     stop_distances.append(entry_price * stop_percent / 100.0)
-            risk_amount = min(stop_distances) * quantity if stop_distances else 0.0
+            risk_amount = min(stop_distances) * quantity * entry_rate if stop_distances else 0.0
             closed_trades.append({
                 "bucketId": order["bucketId"], "instanceId": order["instanceId"],
                 "strategyName": order["strategyName"], "feedId": order.get("feedId", ""),
@@ -908,6 +1249,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         average_loss = gross_losses / losing_trades if losing_trades else None
         output["metrics"] = {
             "initialEquity": starting_equity, "finalEquity": final_equity,
+            "currency": base_currency,
             "maxDrawdownDollars": max_drawdown_dollars, "maxDrawdownPct": max_drawdown_pct * 100.0,
             "profitNotional": final_equity - starting_equity,
             "profitPct": ((final_equity / starting_equity) - 1.0) * 100.0 if starting_equity else 0.0,
@@ -1032,6 +1374,28 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        if parsed_path.path == "/api/data/settings":
+            relative_path = parse_qs(parsed_path.query).get("path", [""])[0]
+            if not relative_path:
+                self.send_json({"error": "Choose a data file."}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                target = safe_workspace_path(PROJECT_ROOT / "data", relative_path)
+                if not target.is_file():
+                    raise WorkspaceItemError("Choose a data file.")
+                self.send_json(dataset_settings(relative_path))
+            except WorkspaceItemError as error:
+                self.send_json({"error": str(error)}, error.status)
+            return
+
+        if parsed_path.path == "/api/strategies/presets":
+            strategy_id = parse_qs(parsed_path.query).get("strategyId", [""])[0]
+            try:
+                self.send_json(get_strategy_presets(strategy_id))
+            except WorkspaceItemError as error:
+                self.send_json({"error": str(error)}, error.status)
+            return
+
         if parsed_path.path == "/api/builder/tree":
             config, _ = read_config()
             configured_path = Path(config["builder"]["path"]).expanduser()
@@ -1076,7 +1440,7 @@ class ConfigHandler(BaseHTTPRequestHandler):
         self.send_json({**config, "builderConfigured": builder_configured, "backtestConfigured": raw_backtest_configured})
 
     def do_PUT(self) -> None:  # noqa: N802
-        if self.path not in {"/api/config/builder", "/api/config/backtest", "/api/workspace/items", "/api/workspace/file"}:
+        if self.path not in {"/api/config/builder", "/api/config/backtest", "/api/workspace/items", "/api/workspace/file", "/api/data/settings", "/api/strategies/presets"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -1106,6 +1470,20 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        if self.path == "/api/data/settings":
+            try:
+                self.send_json(save_dataset_settings(payload))
+            except WorkspaceItemError as error:
+                self.send_json({"error": str(error)}, error.status)
+            return
+
+        if self.path == "/api/strategies/presets":
+            try:
+                self.send_json(save_strategy_presets(payload))
+            except WorkspaceItemError as error:
+                self.send_json({"error": str(error)}, error.status)
+            return
+
         if self.path == "/api/config/backtest":
             settings = {}
             try:
@@ -1122,6 +1500,12 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 settings["run_mode"] = payload["run_mode"]
                 if settings["run_mode"] not in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
                     raise ValueError("Choose a valid trade direction mode.")
+                settings["base_currency"] = payload["base_currency"]
+                if not isinstance(settings["base_currency"], str) or not re.fullmatch(r"[A-Z]{3}", settings["base_currency"]):
+                    raise ValueError("Base currency must be a three-letter currency code, such as USD.")
+                settings["ignore_currency"] = payload["ignore_currency"]
+                if not isinstance(settings["ignore_currency"], bool):
+                    raise ValueError("Ignore currency must be enabled or disabled.")
             except (KeyError, TypeError, ValueError) as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
                 return

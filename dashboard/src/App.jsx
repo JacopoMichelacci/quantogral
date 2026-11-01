@@ -8,6 +8,46 @@ const SITE_THEME_KEY = 'quantogral.siteTheme'
 const SIDEBAR_MIN_WIDTH = 220
 const SIDEBAR_MAX_WIDTH = 420
 
+const FALLBACK_TIMEZONES = ['UTC', 'America/Chicago', 'America/Los_Angeles', 'America/New_York', 'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney']
+const TIMEZONE_OPTIONS = [...new Set(['UTC', ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : FALLBACK_TIMEZONES)])]
+  .map((value) => ({ value, label: value }))
+  .sort((left, right) => left.value === 'UTC' ? -1 : right.value === 'UTC' ? 1 : left.label.localeCompare(right.label))
+const CURRENCY_OPTIONS = (() => {
+  const codes = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('currency') : ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY']
+  const names = new Intl.DisplayNames(undefined, { type: 'currency' })
+  return codes.filter((code) => /^[A-Z]{3}$/.test(code)).map((value) => ({ value, label: `${value} · ${names.of(value) || value}` }))
+    .sort((left, right) => left.value === 'USD' ? -1 : right.value === 'USD' ? 1 : left.value.localeCompare(right.value))
+})()
+
+function SearchableSelect({ value, options, onChange, placeholder = 'Search…', ariaLabel }) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const rootRef = useRef(null)
+  const selected = options.find((option) => option.value === value)
+  const filtered = options.filter((option) => `${option.value} ${option.label}`.toLowerCase().includes(query.trim().toLowerCase())).slice(0, 100)
+  useEffect(() => {
+    if (!open) return undefined
+    const closeOnOutsideClick = (event) => { if (!rootRef.current?.contains(event.target)) setOpen(false) }
+    const closeOnEscape = (event) => { if (event.key === 'Escape') setOpen(false) }
+    window.addEventListener('pointerdown', closeOnOutsideClick)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => { window.removeEventListener('pointerdown', closeOnOutsideClick); window.removeEventListener('keydown', closeOnEscape) }
+  }, [open])
+  return (
+    <div className={`searchable-select ${open ? 'is-open' : ''}`} ref={rootRef}>
+      <button aria-expanded={open} aria-label={ariaLabel} className="searchable-select-toggle" onClick={() => { setOpen((current) => !current); setQuery('') }} type="button">
+        <span>{selected?.label || value || 'Choose…'}</span><span aria-hidden="true">⌄</span>
+      </button>
+      {open && <div className="searchable-select-menu">
+        <input autoFocus aria-label={`Search ${ariaLabel || 'options'}`} onChange={(event) => setQuery(event.target.value)} placeholder={placeholder} value={query} />
+        <div className="searchable-select-options" role="listbox">
+          {filtered.length ? filtered.map((option) => <button aria-selected={option.value === value} key={option.value} onClick={() => { onChange(option.value); setOpen(false); setQuery('') }} role="option" type="button">{option.label}</button>) : <span className="searchable-select-empty">No matches</span>}
+        </div>
+      </div>}
+    </div>
+  )
+}
+
 function parseCsvPreview(content, edgeRows = 100) {
   let header = null
   let dataRowCount = 0
@@ -103,9 +143,11 @@ function loadBacktestSettings() {
       fill_latency_seconds: Number.isFinite(Number(saved.fill_latency_seconds)) ? Number(saved.fill_latency_seconds) : 0,
       capital_allocation: saved.capital_allocation === 'EQUAL_PER_STRATEGY' ? 'EQUAL_PER_STRATEGY' : 'SHARED',
       run_mode: ['BOTH', 'LONG_ONLY', 'SHORT_ONLY', 'COMPARE_ALL'].includes(saved.run_mode) ? saved.run_mode : 'BOTH',
+      base_currency: /^[A-Z]{3}$/.test(saved.base_currency) ? saved.base_currency : 'USD',
+      ignore_currency: Boolean(saved.ignore_currency),
     }
   } catch {
-    return { initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', run_mode: 'BOTH' }
+    return { initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', run_mode: 'BOTH', base_currency: 'USD', ignore_currency: false }
   }
 }
 
@@ -213,7 +255,7 @@ function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelect
           <ScriptIcon />
           <span>{node.name}</span>
         </button>
-        {!selectingStrategies && <button aria-label={`Settings for ${node.name}`} className="item-settings" onClick={() => onOpenItemSettings({ scope, path: relativePath, name: node.name, type: 'file' })} title={`Settings for ${node.name}`} type="button">⚙</button>}
+        {!selectingStrategies && <button aria-label={`Settings for ${node.name}`} className="item-settings" onClick={() => onOpenItemSettings({ scope, path: relativePath, name: node.name, type: 'file', strategyId: strategy?.id })} title={`Settings for ${node.name}`} type="button">⚙</button>}
       </div>
     )
   }
@@ -273,11 +315,105 @@ function ConfigField({ field, value, onChange }) {
   )
 }
 
+function strategyDefaults(strategy) {
+  return Object.fromEntries(strategy.parameters.map((field) => [field.key, field.default]))
+}
+
+function presetFieldSchema(field) {
+  return JSON.stringify({ type: field.type, options: field.options || [] })
+}
+
+function presetIsStale(preset, strategy) {
+  const current = Object.fromEntries(strategy.parameters.map((field) => [field.key, presetFieldSchema(field)]))
+  const saved = preset.fields || {}
+  return Object.keys(current).length !== Object.keys(saved).length || Object.entries(current).some(([key, schema]) => saved[key] !== schema && saved[key] !== JSON.parse(schema).type)
+}
+
+function reconcilePresetConfig(preset, strategy) {
+  const result = {}
+  for (const field of strategy.parameters) {
+    const savedSchema = preset.fields?.[field.key]
+    result[field.key] = (savedSchema === presetFieldSchema(field) || savedSchema === field.type) && Object.hasOwn(preset.config || {}, field.key)
+      ? preset.config[field.key]
+      : field.default
+  }
+  return result
+}
+
+function PresetManagerDialog({ strategy, initialData, onPersist, onClose }) {
+  const [data, setData] = useState(initialData || { presets: [], lastPresetId: null })
+  const firstPreset = initialData?.presets?.[0]
+  const [selectedId, setSelectedId] = useState(firstPreset?.id || '')
+  const [name, setName] = useState(firstPreset?.name || '')
+  const [config, setConfig] = useState(firstPreset ? reconcilePresetConfig(firstPreset, strategy) : strategyDefaults(strategy))
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const selected = data.presets.find((preset) => preset.id === selectedId)
+  function createPreset() {
+    const id = globalThis.crypto?.randomUUID?.() || `preset-${Date.now()}`
+    const preset = { id, name: 'New preset', config: strategyDefaults(strategy), fields: Object.fromEntries(strategy.parameters.map((field) => [field.key, presetFieldSchema(field)])) }
+    const next = { ...data, presets: [...data.presets, preset], lastPresetId: id }
+    setData(next)
+    setSelectedId(id)
+    setName(preset.name)
+    setConfig(preset.config)
+  }
+
+  async function savePreset() {
+    if (!selected || !name.trim()) { setError('Enter a preset name.'); return }
+    const fields = Object.fromEntries(strategy.parameters.map((field) => [field.key, presetFieldSchema(field)]))
+    const updated = { ...selected, name: name.trim(), config, fields }
+    const next = { ...data, presets: data.presets.map((preset) => preset.id === selectedId ? updated : preset), lastPresetId: selectedId }
+    setSaving(true)
+    setError('')
+    try {
+      const result = await onPersist(strategy.id, next)
+      setData(result)
+    } catch (saveError) {
+      setError(saveError.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function removePreset() {
+    if (!selected) return
+    const remaining = data.presets.filter((preset) => preset.id !== selectedId)
+    const next = { presets: remaining, lastPresetId: remaining[0]?.id || null }
+    setSaving(true)
+    try {
+      const result = await onPersist(strategy.id, next)
+      setData(result)
+      setSelectedId(result.presets[0]?.id || '')
+    } catch (saveError) { setError(saveError.message) } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="dialog-backdrop" onMouseDown={onClose}>
+      <section aria-labelledby="preset-manager-title" aria-modal="true" className="path-dialog preset-manager-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+        <button aria-label="Close preset manager" className="dialog-close-button" onClick={onClose} type="button">×</button>
+        <div className="eyebrow">CODE WORKSPACE · STRATEGY PRESETS</div>
+        <h2 id="preset-manager-title">{strategy.name} presets</h2>
+        <div className="preset-manager-layout">
+          <div className="preset-list">{data.presets.map((preset) => <button className={preset.id === selectedId ? 'is-selected' : ''} key={preset.id} onClick={() => { setSelectedId(preset.id); setName(preset.name); setConfig(reconcilePresetConfig(preset, strategy)) }} type="button">{preset.name}{presetIsStale(preset, strategy) && <small>STALE</small>}</button>)}<button className="preset-create-button" onClick={createPreset} type="button">+ New preset</button></div>
+          {selected ? <div className="preset-editor">
+            <label className="config-field"><span>Preset name</span><input onChange={(event) => setName(event.target.value)} value={name} /></label>
+            {presetIsStale(selected, strategy) && <p className="input-help">This preset has changed fields. Matching name and type values are preserved; new or changed fields use current defaults. Save to update it.</p>}
+            <div className="config-grid">{strategy.parameters.map((field) => <ConfigField key={field.key} field={field} value={config[field.key]} onChange={(key, value) => setConfig((current) => ({ ...current, [key]: value }))} />)}</div>
+            {error && <p className="form-error">{error}</p>}
+            <div className="dialog-actions"><button className="danger-button" disabled={saving} onClick={removePreset} type="button">Delete preset</button><button className="primary-button" disabled={saving || !name.trim()} onClick={savePreset} type="button">{saving ? 'Saving…' : 'Save preset'}</button></div>
+          </div> : <p className="input-help">Create a preset to save a reusable configuration for this strategy.</p>}
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function BacktestSettingsPanel({ open, draft, error, onToggle, onChange, onSave, onCancel }) {
   return (
     <section className={`backtest-settings-panel ${open ? 'is-expanded' : ''}`}>
       <button aria-expanded={open} className="backtest-settings-panel-toggle" onClick={onToggle} type="button">
-        <span className="tree-chevron">{open ? '⌄' : '›'}</span><strong>Run settings</strong><span className="backtest-settings-summary">Capital, costs, allocation, latency</span>
+        <span className="tree-chevron">{open ? '⌄' : '›'}</span><strong>Run settings</strong><span className="backtest-settings-summary">Capital, currency, costs, allocation, latency</span>
       </button>
       {open && <div className="backtest-settings-panel-content">
         <div className="backtest-settings-fields">
@@ -286,18 +422,39 @@ function BacktestSettingsPanel({ open, draft, error, onToggle, onChange, onSave,
           <label className="config-field"><span>Fill latency (seconds)</span><input min="0" onChange={(event) => onChange('fill_latency_seconds', event.target.value)} step="0.001" type="number" value={draft.fill_latency_seconds} /><small>Used for quote/tick data. OHLCV backtests fill at the next bar open.</small></label>
           <label className="config-field"><span>Capital allocation</span><select onChange={(event) => onChange('capital_allocation', event.target.value)} value={draft.capital_allocation}><option value="SHARED">Shared across all strategies</option><option value="EQUAL_PER_STRATEGY">Split evenly across all strategies</option></select></label>
           <label className="config-field"><span>Trade directions</span><select onChange={(event) => onChange('run_mode', event.target.value)} value={draft.run_mode}><option value="BOTH">Long and short</option><option value="LONG_ONLY">Long only</option><option value="SHORT_ONLY">Short only</option><option value="COMPARE_ALL">Compare all three</option></select><small>Compare runs Long and short, Long only, and Short only independently.</small></label>
+          <label className="config-field"><span>Portfolio currency</span><SearchableSelect ariaLabel="portfolio currency" onChange={(value) => onChange('base_currency', value)} options={CURRENCY_OPTIONS} placeholder="Search currencies…" value={draft.base_currency || 'USD'} /><small>Currency used for account cash and portfolio reporting.</small></label>
+          <label className="config-toggle"><input checked={Boolean(draft.ignore_currency)} onChange={(event) => onChange('ignore_currency', event.target.checked)} type="checkbox" /><span>Ignore currency conversion</span></label>
         </div>
+        {!draft.ignore_currency && <p className="input-help">Buckets with assets in another currency need matching FX history added to that bucket.</p>}
         {error && <p className="form-error">{error}</p>}
         <div className="backtest-settings-panel-actions">
           <button className="secondary-button" onClick={onCancel} type="button">Cancel</button>
-          <button className="primary-button" disabled={Number(draft.initial_capital) <= 0 || Number(draft.cost_bps) < 0 || Number(draft.fill_latency_seconds) < 0} onClick={onSave} type="button">Save settings</button>
+          <button className="primary-button" disabled={Number(draft.initial_capital) <= 0 || Number(draft.cost_bps) < 0 || Number(draft.fill_latency_seconds) < 0 || !/^[A-Z]{3}$/.test(draft.base_currency || '')} onClick={onSave} type="button">Save settings</button>
         </div>
       </div>}
     </section>
   )
 }
 
-function EquityCurveChart({ scenarios }) {
+function DatasetSettingsDialog({ file, draft, error, saving, onChange, onSave, onClose }) {
+  if (!file) return null
+  return (
+    <div className="dialog-backdrop" onMouseDown={onClose}>
+      <section aria-labelledby="dataset-settings-title" aria-modal="true" className="path-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+        <button aria-label="Close dataset settings" className="dialog-close-button" onClick={onClose} type="button">×</button>
+        <div className="eyebrow">DATA · SETTINGS</div>
+        <h2 id="dataset-settings-title">{file.name}</h2>
+        <p className="workspace-preview-path">{file.path}</p>
+        <label className="config-field"><span>Timezone</span><SearchableSelect ariaLabel="dataset timezone" onChange={(value) => onChange('timezone', value)} options={TIMEZONE_OPTIONS} placeholder="Search timezones…" value={draft.timezone || 'UTC'} /><small>{draft.timezoneSource === 'embedded' ? 'UTC was detected in timestamp values.' : draft.timezoneSource === 'default' ? 'Defaulted to UTC; choose the source timezone if timestamps have no offset.' : 'Timezone used for timestamps without an explicit offset. Explicit offsets are honored.'}</small></label>
+        <label className="config-field"><span>Asset currency</span><SearchableSelect ariaLabel="asset currency" onChange={(value) => onChange('currency', value)} options={CURRENCY_OPTIONS} placeholder="Search currencies…" value={draft.currency || 'USD'} /><small>{draft.currencySource === 'default' ? 'Defaulted to USD; choose the currency the asset is priced in.' : 'Currency used to interpret this asset’s prices.'}</small></label>
+        {error && <p className="form-error">{error}</p>}
+        <div className="dialog-actions"><button className="secondary-button" onClick={onClose} type="button">Cancel</button><button className="primary-button" disabled={saving} onClick={onSave} type="button">{saving ? 'Saving…' : 'Save dataset settings'}</button></div>
+      </section>
+    </div>
+  )
+}
+
+function EquityCurveChart({ scenarios, currency = 'USD' }) {
   const colors = { both: '#dc3038', long_only: '#a8232b', short_only: '#f07178' }
   const [hoveredPoint, setHoveredPoint] = useState(null)
   const series = scenarios.map((scenario) => {
@@ -324,7 +481,7 @@ function EquityCurveChart({ scenarios }) {
   const equityValues = series.flatMap((item) => item.values.map((point) => point.equity))
   const drawdownDollars = series.flatMap((item) => item.values.map((point) => point.drawdownDollars))
   const drawdownPercentages = series.flatMap((item) => item.values.map((point) => point.drawdownPct))
-  const formatCurrencyAxis = (value) => `${value < 0 ? '−' : ''}$${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+  const formatCurrencyAxis = (value) => `${value < 0 ? '−' : ''}${Math.abs(value).toLocaleString(undefined, { style: 'currency', currency, maximumFractionDigits: 0 })}`
   const formatPercentAxis = (value) => `${value.toFixed(2)}%`
   const formatDateAxis = (timestamp) => {
     const date = new Date(timestamp)
@@ -340,7 +497,7 @@ function EquityCurveChart({ scenarios }) {
   const maxDrawdownDollars = drawdownDollars.reduce((maximum, value) => Math.max(maximum, -value), 0)
   const maxDrawdownPercent = drawdownPercentages.reduce((maximum, value) => Math.max(maximum, -value), 0)
 
-  function renderPanel({ title, height, top, bottom, min, max, valueKey, format, showDates = false }) {
+  function renderPanel({ title, height, top, bottom, min, max, valueKey, format, showDates = false, fillDrawdown = false }) {
     const range = max - min || 1
     const plotHeight = height - top - bottom
     const yFor = (value) => top + ((max - value) / range) * plotHeight
@@ -380,7 +537,7 @@ function EquityCurveChart({ scenarios }) {
     const tooltipY = panelHover ? Math.max(top + 3, Math.min(height - bottom - tooltipHeight, panelHover.y - tooltipHeight - 8)) : 0
     const hoverProfit = panelHover ? panelHover.point.equity - panelHover.item.initial : 0
     const hoverProfitPct = panelHover && panelHover.item.initial ? hoverProfit / panelHover.item.initial * 100 : 0
-    const signedMoney = (value) => `${value >= 0 ? '+' : '−'}${reportMoney(Math.abs(value))}`
+    const signedMoney = (value) => `${value >= 0 ? '+' : '−'}${reportMoney(Math.abs(value), currency)}`
     const signedPercent = (value) => `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(2)}%`
     return <svg aria-label={title} className={`equity-chart ${height < 150 ? 'is-drawdown-chart' : 'is-equity-chart'}`} key={title} onPointerLeave={() => setHoveredPoint(null)} onPointerMove={handlePointerMove} role="img" viewBox={`0 0 ${width} ${height}`}>
       {xTicks.map((timestamp, index) => <line className="equity-x-gridline" key={`x-${index}`} x1={xFor(timestamp)} x2={xFor(timestamp)} y1={top} y2={height - bottom} />)}
@@ -388,7 +545,11 @@ function EquityCurveChart({ scenarios }) {
       {showDates && xTicks.map((timestamp, index) => <text key={index} x={xFor(timestamp)} y={height - 4} textAnchor={index === 0 ? 'start' : index === xTicks.length - 1 ? 'end' : 'middle'}>{formatDateAxis(timestamp)}</text>)}
       {series.map((item) => {
         const points = item.points.map((point) => `${xFor(point.timestamp)},${yFor(point[valueKey])}`).join(' ')
+        const firstX = xFor(item.points[0].timestamp)
+        const lastX = xFor(item.points[item.points.length - 1].timestamp)
+        const drawdownArea = `${firstX},${yFor(0)} ${points} ${lastX},${yFor(0)}`
         return <g key={item.id} style={{ '--curve-color': colors[item.id] || '#dc3038' }}>
+          {fillDrawdown && <polygon className="equity-drawdown-fill" points={drawdownArea} />}
           <polyline points={points} />
         </g>
       })}
@@ -397,9 +558,9 @@ function EquityCurveChart({ scenarios }) {
         <circle className="equity-hover-marker" cx={panelHover.x} cy={panelHover.y} r="4" style={{ '--curve-color': colors[panelHover.item.id] || '#dc3038' }} />
         <rect className="equity-hover-tooltip" height={tooltipHeight} rx="5" width={tooltipWidth} x={tooltipX} y={tooltipY} />
         <text className="equity-hover-tooltip-title" x={tooltipX + 8} y={tooltipY + 14}>{panelHover.item.label} · {formatTooltipDate(panelHover.point.timestamp)}</text>
-        <text className="equity-hover-tooltip-text" x={tooltipX + 8} y={tooltipY + 29}>Equity: {reportMoney(panelHover.point.equity)}</text>
+        <text className="equity-hover-tooltip-text" x={tooltipX + 8} y={tooltipY + 29}>Equity: {reportMoney(panelHover.point.equity, currency)}</text>
         <text className="equity-hover-tooltip-text" x={tooltipX + 8} y={tooltipY + 44}>P&amp;L vs start: {signedMoney(hoverProfit)} ({signedPercent(hoverProfitPct)})</text>
-        <text className="equity-hover-tooltip-text" x={tooltipX + 8} y={tooltipY + 59}>DD from peak: {reportMoney(panelHover.point.drawdownDollars)} ({formatPercentAxis(panelHover.point.drawdownPct)})</text>
+        <text className="equity-hover-tooltip-text" x={tooltipX + 8} y={tooltipY + 59}>DD from peak: {reportMoney(panelHover.point.drawdownDollars, currency)} ({formatPercentAxis(panelHover.point.drawdownPct)})</text>
       </g>}
     </svg>
   }
@@ -414,15 +575,15 @@ function EquityCurveChart({ scenarios }) {
     <section aria-label="Backtest equity and drawdown charts" className="equity-chart-card">
       <div className="config-section-heading"><h3>Equity and drawdown</h3><span>Equity shown in account currency · hover a line for exact values</span></div>
       <div className="equity-chart-panel"><div className="equity-chart-panel-label">Equity value</div>{renderPanel({ title: 'Equity value over time', height: 270, top: 14, bottom: 12, min: equityMin - equityPadding, max: equityMax + equityPadding, valueKey: 'equity', format: formatCurrencyAxis })}</div>
-      <div className="equity-chart-panel drawdown-chart-panel"><div className="equity-chart-panel-label">Drawdown ($)</div>{renderPanel({ title: 'Drawdown in dollars', height: 90, top: 8, bottom: 8, min: -dollarFloor, max: 0, valueKey: 'drawdownDollars', format: formatCurrencyAxis })}</div>
-      <div className="equity-chart-panel drawdown-chart-panel"><div className="equity-chart-panel-label">Drawdown (%)</div>{renderPanel({ title: 'Drawdown in percent', height: 90, top: 8, bottom: 23, min: -percentFloor, max: 0, valueKey: 'drawdownPct', format: formatPercentAxis, showDates: true })}</div>
+      <div className="equity-chart-panel drawdown-chart-panel"><div className="equity-chart-panel-label">Drawdown ({currency})</div>{renderPanel({ title: `Drawdown in ${currency}`, height: 90, top: 8, bottom: 8, min: -dollarFloor, max: 0, valueKey: 'drawdownDollars', format: formatCurrencyAxis, fillDrawdown: true })}</div>
+      <div className="equity-chart-panel drawdown-chart-panel"><div className="equity-chart-panel-label">Drawdown (%)</div>{renderPanel({ title: 'Drawdown in percent', height: 90, top: 8, bottom: 23, min: -percentFloor, max: 0, valueKey: 'drawdownPct', format: formatPercentAxis, showDates: true, fillDrawdown: true })}</div>
       <div className="equity-chart-legend">{series.map((item) => <span key={item.id} style={{ '--curve-color': colors[item.id] || '#dc3038' }}><i />{item.label}</span>)}</div>
     </section>
   )
 }
 
-function reportMoney(value) {
-  return Number.isFinite(value) ? value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : '—'
+function reportMoney(value, currency = 'USD') {
+  return Number.isFinite(value) ? value.toLocaleString(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }) : '—'
 }
 
 function reportNumber(value, suffix = '', maximumFractionDigits = 2) {
@@ -438,6 +599,7 @@ function BacktestReport({ scenarios, compare }) {
   const [activeTab, setActiveTab] = useState('general')
   const [detailScenarioId, setDetailScenarioId] = useState(scenarios[0]?.scenarioId || 'both')
   const detailScenario = scenarios.find((scenario) => scenario.scenarioId === detailScenarioId) || scenarios[0]
+  const currency = detailScenario.metrics.currency || 'USD'
   const tabs = [
     ['general', 'General Report'], ['performance', 'Performance'], ['trades', 'Trades'], ['orders', 'Order Log'],
   ]
@@ -446,15 +608,15 @@ function BacktestReport({ scenarios, compare }) {
       <h3>{scenario.scenarioLabel}</h3>
       <div className="report-metric-grid">
         {kind === 'general' ? <>
-          <div><span>Equity</span><strong>{reportMoney(scenario.metrics.finalEquity)}</strong></div>
-          <div><span>Maximum drawdown</span><strong>{reportMoney(scenario.metrics.maxDrawdownDollars)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
+          <div><span>Equity</span><strong>{reportMoney(scenario.metrics.finalEquity, currency)}</strong></div>
+          <div><span>Maximum drawdown</span><strong>{reportMoney(scenario.metrics.maxDrawdownDollars, currency)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
           <div><span>Sharpe</span><strong>{reportNumber(scenario.metrics.sharpe, '', 4)}</strong></div>
-          <div><span>Average profit / trade</span><strong>{reportMoney(scenario.metrics.averageProfitPerTrade)}</strong></div>
+          <div><span>Average profit / trade</span><strong>{reportMoney(scenario.metrics.averageProfitPerTrade, currency)}</strong></div>
           <div><span>Trades / year</span><strong>{reportNumber(scenario.metrics.tradesPerYear)}</strong></div>
         </> : <>
-          <div><span>Profit notional</span><strong>{reportMoney(scenario.metrics.profitNotional)}</strong></div>
+          <div><span>Profit notional</span><strong>{reportMoney(scenario.metrics.profitNotional, currency)}</strong></div>
           <div><span>Profit</span><strong>{reportNumber(scenario.metrics.profitPct, '%')}</strong></div>
-          <div><span>Maximum drawdown</span><strong>{reportMoney(scenario.metrics.maxDrawdownDollars)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
+          <div><span>Maximum drawdown</span><strong>{reportMoney(scenario.metrics.maxDrawdownDollars, currency)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
           <div><span>CAGR</span><strong>{reportNumber(scenario.metrics.cagrPct, '%', 4)}</strong></div>
           <div><span>Win ratio</span><strong>{reportNumber(scenario.metrics.winRatio, '%')}</strong></div>
           <div><span>Win/loss ratio</span><strong>{scenario.metrics.winLossRatioInfinite ? '∞' : reportNumber(scenario.metrics.winLossRatio)}</strong></div>
@@ -480,16 +642,16 @@ function BacktestReport({ scenarios, compare }) {
         {scenarios.map((scenario) => <button aria-pressed={detailScenario.scenarioId === scenario.scenarioId} className={detailScenario.scenarioId === scenario.scenarioId ? 'is-active' : ''} key={scenario.scenarioId} onClick={() => setDetailScenarioId(scenario.scenarioId)} type="button">{scenario.scenarioLabel}</button>)}
       </div>}
       {activeTab === 'general' && <>
-        <EquityCurveChart scenarios={scenarios} />
+        <EquityCurveChart currency={currency} scenarios={scenarios} />
         <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('general')}</div>
       </>}
       {activeTab === 'performance' && <>
         <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div>
-        <p className="report-footnote">Sharpe and Sortino are annualized from daily UTC portfolio returns using √252. CAGR is annualized over the data span; Calmar divides CAGR by maximum drawdown. Win ratio is the percentage of completed trades that made a profit. Win/loss ratio is average winning profit divided by the absolute average losing profit. Profit factor is gross winning profit divided by gross losing profit, so it also reflects how often wins and losses occur. Portfolio profit includes open mark-to-market P&L; trade metrics use completed trades. R multiples in the Trades table require a configured hard stop.</p>
+        <p className="report-footnote">Sharpe and Sortino are annualized from daily UTC portfolio returns using √252. CAGR is annualized over the data span; Calmar divides CAGR by maximum drawdown. Win ratio is the percentage of completed trades that made a profit. Win/loss ratio is average winning profit divided by the absolute average losing profit. Profit factor is gross winning profit divided by gross losing profit, so it also reflects how often wins and losses occur. Portfolio profit includes open mark-to-market P&L; trade metrics use completed trades. When currency conversion is enabled, accounting and profit use the portfolio currency while entry and exit prices remain in each asset’s native currency. R multiples in the Trades table require a configured hard stop.</p>
       </>}
       {activeTab === 'trades' && <div className="orders-table-wrap report-table-wrap">
         <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Quantity</th><th>Entry</th><th>Exit</th><th>Net profit</th><th>R multiple</th></tr></thead>
-          <tbody>{detailScenario.trades?.length ? detailScenario.trades.map((trade, index) => <tr key={`${trade.bucketId}-${trade.instanceId}-${trade.entryTimestamp}-${index}`}><td>{trade.bucketId}</td><td>{trade.strategyName} · {trade.instanceId}</td><td>{trade.side}</td><td>{reportTimestamp(trade.entryTimestamp)}</td><td>{reportTimestamp(trade.exitTimestamp)}</td><td>{reportNumber(trade.quantity)}</td><td>{reportNumber(trade.entryPrice)}</td><td>{reportNumber(trade.exitPrice)}</td><td>{reportMoney(trade.profit)}</td><td>{trade.riskReward == null ? '—' : `${reportNumber(trade.riskReward)} R`}</td></tr>) : <tr><td colSpan="10">No completed trades in this scenario.</td></tr>}</tbody>
+          <tbody>{detailScenario.trades?.length ? detailScenario.trades.map((trade, index) => <tr key={`${trade.bucketId}-${trade.instanceId}-${trade.entryTimestamp}-${index}`}><td>{trade.bucketId}</td><td>{trade.strategyName} · {trade.instanceId}</td><td>{trade.side}</td><td>{reportTimestamp(trade.entryTimestamp)}</td><td>{reportTimestamp(trade.exitTimestamp)}</td><td>{reportNumber(trade.quantity)}</td><td>{reportNumber(trade.entryPrice)}</td><td>{reportNumber(trade.exitPrice)}</td><td>{reportMoney(trade.profit, currency)}</td><td>{trade.riskReward == null ? '—' : `${reportNumber(trade.riskReward)} R`}</td></tr>) : <tr><td colSpan="10">No completed trades in this scenario.</td></tr>}</tbody>
         </table>
       </div>}
       {activeTab === 'orders' && <div className="orders-table-wrap report-table-wrap">
@@ -503,12 +665,19 @@ function BacktestReport({ scenarios, compare }) {
 
 function BacktestBucketPanel({
   bucket, strategies, dataFiles, strategyCatalog, expandedStrategies, selectedForSidebar,
+  strategyPresets, presetMenuInstanceId, onTogglePresetMenu, onSelectPreset,
+  fxFiles, fxDropHover, baseCurrency, ignoreCurrency, onFxDragEnter, onFxDragLeave, onFxDrop, onRemoveFxFile, onUpdateFxFeed, onUpdateFxPair,
   strategyDropHover, dataDropHover, manualDataPath, onSelectBucket, onAddStrategy,
   onStrategyDragEnter, onStrategyDragLeave, onStrategyDrop, onDataDragEnter,
   onDataDragLeave, onDataDrop, onToggleStrategy, onRemoveStrategy,
   onToggleFeed, onUpdateStrategy, onRemoveFeed, onUpdateFeed,
   onManualPathChange, onManualPathKeyDown, onAddManualPath,
 }) {
+  const foreignCurrencies = [...new Set(dataFiles.map((feed) => feed.datasetSettings?.currency).filter((currency) => currency && currency !== baseCurrency))]
+  const coveredCurrencies = (fxFile) => foreignCurrencies.filter((currency) => {
+    const pair = [fxFile.datasetSettings?.fxBaseCurrency, fxFile.datasetSettings?.fxQuoteCurrency]
+    return pair.includes(currency) && pair.includes(baseCurrency)
+  })
   return (
     <section className="backtest-bucket">
       <div className="backtest-bucket-heading">
@@ -539,8 +708,10 @@ function BacktestBucketPanel({
                   <button aria-expanded={expanded} aria-controls={`strategy-config-${strategy.instanceId}`} className="strategy-config-toggle" onClick={() => onToggleStrategy(strategy.instanceId)} type="button">
                     <span className="tree-chevron">{expanded ? '⌄' : '›'}</span><strong>{strategy.name}</strong><span className="strategy-config-id" title="Strategy instance ID">{strategy.instanceId}</span>
                   </button>
+                  <button aria-label={`Choose preset for ${strategy.name}`} className="item-settings strategy-preset-button" onClick={() => onTogglePresetMenu(strategy.instanceId)} title="Choose strategy preset" type="button">⚙</button>
                   <button aria-label={`Remove ${strategy.name}`} className="remove-item-button" onClick={() => onRemoveStrategy(strategy.instanceId)} type="button">×</button>
                 </div>
+                {presetMenuInstanceId === strategy.instanceId && <div className="strategy-preset-menu"><label><span>Preset</span><select onChange={(event) => onSelectPreset(strategy.instanceId, event.target.value)} value={strategy.presetId || ''}><option value="" disabled>Select a preset</option>{(strategyPresets[strategy.id]?.presets || []).map((preset) => <option key={preset.id} value={preset.id}>{preset.name}{presetIsStale(preset, strategy) ? ' · stale' : ''}</option>)}</select></label>{(!strategyPresets[strategy.id]?.presets?.length) && <small>Create presets from this strategy file’s settings menu.</small>}</div>}
                 {expanded && <div className="strategy-config-details" id={`strategy-config-${strategy.instanceId}`}>
                   <section>
                     <div className="config-section-heading"><h3>Connected feeds</h3><span>{strategy.feedIds.length} selected</span></div>
@@ -581,7 +752,7 @@ function BacktestBucketPanel({
         >Drop data feeds here from the project explorer</div>
         {dataFiles.length > 0 && <div className="assembly-list data-file-list">
           {dataFiles.map((feed) => <div className="data-file-row bucket-feed-row" key={feed.instanceId}>
-            <ScriptIcon /><span className="data-file-name" title={feed.path}>{feed.name}</span><span className="data-file-path">{feed.path}</span>
+            <ScriptIcon /><span className="data-file-name" title={feed.path}>{feed.name}</span><span className="data-file-path">{feed.path}</span><span className="feed-market-meta" title={`Timezone: ${feed.datasetSettings?.timezone || 'UTC'}`}>{feed.datasetSettings?.currency || 'USD'}</span>
             <label className="feed-setting"><span>Numeric time</span><select onChange={(event) => onUpdateFeed(feed.instanceId, 'tsUnit', event.target.value)} value={feed.tsUnit}><option>SECONDS</option><option>MILLISECONDS</option><option>MICROSECONDS</option><option>NANOSECONDS</option></select></label>
             <label className="feed-setting"><span>Date order</span><select onChange={(event) => onUpdateFeed(feed.instanceId, 'dateFormat', event.target.value)} value={feed.dateFormat}><option>DDMMYYYY</option><option>MMDDYYYY</option></select></label>
             <button aria-label={`Remove ${feed.name}`} className="remove-item-button" onClick={() => onRemoveFeed(feed.instanceId)} type="button">×</button>
@@ -592,6 +763,21 @@ function BacktestBucketPanel({
           <button className="secondary-button" disabled={!manualDataPath.trim()} onClick={() => onAddManualPath(bucket.id)} type="button">Add feed</button>
         </div>
       </section>
+
+      {!ignoreCurrency && foreignCurrencies.length > 0 && <section className="config-section assembly-section">
+        <div className="config-section-heading"><h2>FX conversion history</h2><span>Portfolio currency · {baseCurrency}</span></div>
+        <p className="input-help">Add user-provided FX files here when this bucket has assets in another currency, then choose each file’s base and quote currencies below.</p>
+        <p className="fx-required-currencies">Required pairs: {foreignCurrencies.map((currency) => `${currency}/${baseCurrency}`).join(', ')}{foreignCurrencies.every((currency) => fxFiles.some((file) => coveredCurrencies(file).includes(currency))) ? ' · covered' : ' · missing history'}</p>
+        <div className={`assembly-drop-target fx-assembly-target ${fxDropHover ? 'is-drag-hovering' : ''}`} onDragEnter={(event) => onFxDragEnter(bucket.id, event)} onDragLeave={(event) => onFxDragLeave(bucket.id, event)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => onFxDrop(bucket.id, event)}>Drop FX history files here from the project explorer</div>
+        {fxFiles.length > 0 && <div className="assembly-list data-file-list">{fxFiles.map((feed) => <div className="data-file-row bucket-feed-row fx-feed-row" key={feed.instanceId}>
+          <ScriptIcon /><span className="data-file-name">{feed.name}</span><span className="data-file-path" title={feed.path}>{feed.path}</span>
+          <label className="feed-setting fx-pair-setting"><span>Pair base</span><SearchableSelect ariaLabel={`${feed.name} FX pair base`} onChange={(value) => onUpdateFxPair(feed.instanceId, 'fxBaseCurrency', value)} options={CURRENCY_OPTIONS} placeholder="Search currencies…" value={feed.datasetSettings.fxBaseCurrency || ''} /></label>
+          <label className="feed-setting fx-pair-setting"><span>Pair quote</span><SearchableSelect ariaLabel={`${feed.name} FX pair quote`} onChange={(value) => onUpdateFxPair(feed.instanceId, 'fxQuoteCurrency', value)} options={CURRENCY_OPTIONS} placeholder="Search currencies…" value={feed.datasetSettings.fxQuoteCurrency || ''} /></label>
+          <label className="feed-setting"><span>Numeric time</span><select onChange={(event) => onUpdateFxFeed(feed.instanceId, 'tsUnit', event.target.value)} value={feed.tsUnit}><option>SECONDS</option><option>MILLISECONDS</option><option>MICROSECONDS</option><option>NANOSECONDS</option></select></label>
+          <label className="feed-setting"><span>Date order</span><select onChange={(event) => onUpdateFxFeed(feed.instanceId, 'dateFormat', event.target.value)} value={feed.dateFormat}><option>DDMMYYYY</option><option>MMDDYYYY</option></select></label>
+          <button aria-label={`Remove FX history ${feed.name}`} className="remove-item-button" onClick={() => onRemoveFxFile(feed.instanceId)} type="button">×</button>
+        </div>)}</div>}
+      </section>}
     </section>
   )
 }
@@ -611,6 +797,11 @@ function App() {
   const [builderDialogOpen, setBuilderDialogOpen] = useState(false)
   const [builderDialogView, setBuilderDialogView] = useState('menu')
   const [itemDialog, setItemDialog] = useState(null)
+  const [datasetSettingsDialog, setDatasetSettingsDialog] = useState(null)
+  const [datasetSettingsDraft, setDatasetSettingsDraft] = useState(null)
+  const [datasetSettingsError, setDatasetSettingsError] = useState('')
+  const [savingDatasetSettings, setSavingDatasetSettings] = useState(false)
+  const [datasetMetadata, setDatasetMetadata] = useState({})
   const [deleteItemPrompt, setDeleteItemPrompt] = useState(null)
   const [deleteItemError, setDeleteItemError] = useState('')
   const [isDeletingItem, setIsDeletingItem] = useState(false)
@@ -629,11 +820,16 @@ function App() {
   const [unsavedPromptError, setUnsavedPromptError] = useState('')
   const [pendingEditorAction, setPendingEditorAction] = useState(null)
   const [strategyCatalog, setStrategyCatalog] = useState([])
+  const [strategyPresets, setStrategyPresets] = useState({})
+  const [presetManagerStrategy, setPresetManagerStrategy] = useState(null)
+  const [presetManagerData, setPresetManagerData] = useState(null)
+  const [presetMenuInstanceId, setPresetMenuInstanceId] = useState(null)
   const [backtestBuckets, setBacktestBuckets] = useState([{ id: 'bucket-1', name: 'Bucket 1' }])
   const [activeBucketId, setActiveBucketId] = useState('bucket-1')
   const [backtestStrategies, setBacktestStrategies] = useState([])
   const [expandedBacktestStrategies, setExpandedBacktestStrategies] = useState({})
   const [dataFiles, setDataFiles] = useState([])
+  const [fxFiles, setFxFiles] = useState([])
   const [manualDataPath, setManualDataPath] = useState('')
   const [compilation, setCompilation] = useState({ compiled: false, current: false, strategies: [] })
   const [compileSelection, setCompileSelection] = useState({})
@@ -644,6 +840,7 @@ function App() {
   const [isCompiling, setIsCompiling] = useState(false)
   const [strategyDropHoverBucket, setStrategyDropHoverBucket] = useState(null)
   const [dataDropHoverBucket, setDataDropHoverBucket] = useState(null)
+  const [fxDropHoverBucket, setFxDropHoverBucket] = useState(null)
   const strategyInstanceCount = useRef(0)
   const dataInstanceCount = useRef(0)
   const bucketInstanceCount = useRef(1)
@@ -661,7 +858,7 @@ function App() {
   const [backtestElapsedMs, setBacktestElapsedMs] = useState(null)
   const backtestStartedAt = useRef(null)
   const [backtestSettingsOpen, setBacktestSettingsOpen] = useState(false)
-  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED' })
+  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', base_currency: 'USD', ignore_currency: false })
   const [backtestConfig, setBacktestConfig] = useState(loadBacktestSettings)
   const [yahooTicker, setYahooTicker] = useState('')
   const [selectedYahooInstruments, setSelectedYahooInstruments] = useState([])
@@ -740,20 +937,76 @@ function App() {
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [activePage, yahooTicker])
 
-  function applyStrategy(strategy, bucketId = activeBucketId) {
+  async function applyStrategy(strategy, bucketId = activeBucketId) {
+    let savedPresets = strategyPresets[strategy.id]
+    if (!savedPresets) {
+      try {
+        const response = await fetch(`/api/strategies/presets?strategyId=${encodeURIComponent(strategy.id)}`)
+        if (response.ok) savedPresets = await response.json()
+      } catch { /* Strategy insertion can proceed with current defaults when no saved presets load. */ }
+      if (savedPresets) setStrategyPresets((items) => ({ ...items, [strategy.id]: savedPresets }))
+    }
     strategyInstanceCount.current += 1
     const instanceId = `${strategy.id}-${strategyInstanceCount.current}`
     const feedIds = dataFiles.filter((file) => file.bucketId === bucketId).map((file) => file.instanceId)
+    const activePreset = savedPresets?.presets?.find((preset) => typeof preset.name === 'string' && preset.name.trim().toLowerCase() === 'default')
     setBacktestStrategies((items) => [...items, {
       instanceId,
       bucketId,
       feedIds,
       ...strategy,
       baseConfigDraft: Object.fromEntries(strategy.baseConfig.map((field) => [field.key, field.default])),
-      strategyConfigDraft: Object.fromEntries(strategy.parameters.map((field) => [field.key, field.default])),
+      strategyConfigDraft: activePreset ? reconcilePresetConfig(activePreset, strategy) : strategyDefaults(strategy),
+      presetId: activePreset?.id || null,
     }])
     setBacktestResult(null)
     setBacktestError('')
+    if (activePreset && presetIsStale(activePreset, strategy)) {
+      const config = reconcilePresetConfig(activePreset, strategy)
+      const migrated = { ...activePreset, config, fields: Object.fromEntries(strategy.parameters.map((field) => [field.key, presetFieldSchema(field)])) }
+      persistStrategyPresets(strategy.id, { ...savedPresets, presets: savedPresets.presets.map((preset) => preset.id === activePreset.id ? migrated : preset), lastPresetId: activePreset.id }).catch((error) => setBacktestError(error.message))
+    }
+  }
+
+  async function persistStrategyPresets(strategyId, next) {
+    const response = await fetch('/api/strategies/presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ strategyId, ...next }) })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'Could not save strategy presets.')
+    setStrategyPresets((items) => ({ ...items, [strategyId]: result }))
+    return result
+  }
+
+  async function openStrategyPresets(strategy) {
+    if (!strategy) return
+    try {
+      const response = await fetch(`/api/strategies/presets?strategyId=${encodeURIComponent(strategy.id)}`)
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Could not load strategy presets.')
+      setStrategyPresets((items) => ({ ...items, [strategy.id]: result }))
+      setPresetManagerData(result)
+      setPresetManagerStrategy(strategy)
+    } catch (error) {
+      setItemDialogError(error.message)
+    }
+  }
+
+  async function selectStrategyPreset(instanceId, presetId) {
+    const instance = backtestStrategies.find((item) => item.instanceId === instanceId)
+    const presets = strategyPresets[instance?.id]?.presets || []
+    const preset = presets.find((item) => item.id === presetId)
+    if (!instance || !preset) return
+    const config = reconcilePresetConfig(preset, instance)
+    setBacktestStrategies((items) => items.map((item) => item.instanceId === instanceId ? { ...item, strategyConfigDraft: config, presetId } : item))
+    setPresetMenuInstanceId(null)
+    setBacktestResult(null)
+    if (presetIsStale(preset, instance)) {
+      const fields = Object.fromEntries(instance.parameters.map((field) => [field.key, presetFieldSchema(field)]))
+      const migrated = { ...preset, config, fields }
+      await persistStrategyPresets(instance.id, { ...strategyPresets[instance.id], presets: presets.map((item) => item.id === presetId ? migrated : item), lastPresetId: presetId })
+    } else {
+      const current = strategyPresets[instance.id]
+      if (current?.lastPresetId !== presetId) await persistStrategyPresets(instance.id, { ...current, lastPresetId: presetId })
+    }
   }
 
   function handleStrategyDrop(bucketId, event) {
@@ -770,7 +1023,16 @@ function App() {
     if (duplicate) return
     dataInstanceCount.current += 1
     const instanceId = `feed-${dataInstanceCount.current}`
-    setDataFiles((items) => [...items, { instanceId, bucketId, path, name, tsUnit: 'MILLISECONDS', dateFormat: 'DDMMYYYY' }])
+    const relativePath = path.replace(/^\.\/data\//, '')
+    const metadata = datasetMetadata[relativePath] || { currency: 'USD', timezone: 'UTC', fxBaseCurrency: '', fxQuoteCurrency: '' }
+    setDataFiles((items) => [...items, { instanceId, bucketId, path, name, tsUnit: 'MILLISECONDS', dateFormat: 'DDMMYYYY', datasetSettings: metadata }])
+    if (!datasetMetadata[relativePath]) {
+      fetch(`/api/data/settings?path=${encodeURIComponent(relativePath)}`).then((response) => response.ok ? response.json() : null).then((settings) => {
+        if (!settings) return
+        setDatasetMetadata((current) => ({ ...current, [relativePath]: settings }))
+        setDataFiles((items) => items.map((feed) => feed.instanceId === instanceId ? { ...feed, datasetSettings: settings } : feed))
+      }).catch(() => {})
+    }
     setBacktestStrategies((items) => items.map((item) => item.bucketId === bucketId
       ? { ...item, feedIds: item.feedIds.includes(instanceId) ? item.feedIds : [...item.feedIds, instanceId] }
       : item))
@@ -782,6 +1044,32 @@ function App() {
     event.preventDefault()
     const path = event.dataTransfer.getData('application/x-quantogral-data-file')
     if (path) addDataFile(path, path.replaceAll('\\', '/').split('/').pop(), bucketId)
+  }
+
+  async function handleFxDrop(bucketId, event) {
+    event.preventDefault()
+    setFxDropHoverBucket(null)
+    const path = event.dataTransfer.getData('application/x-quantogral-data-file')
+    if (!path) return
+    const duplicate = fxFiles.find((item) => item.path === path && item.bucketId === bucketId)
+    if (duplicate) return
+    const relativePath = path.replace(/^\.\/data\//, '')
+    let metadata = datasetMetadata[relativePath]
+    try {
+      if (!metadata) {
+        const response = await fetch(`/api/data/settings?path=${encodeURIComponent(relativePath)}`)
+        const result = await response.json()
+        if (!response.ok) throw new Error(result.error || 'Could not read FX file settings.')
+        metadata = result
+        setDatasetMetadata((items) => ({ ...items, [relativePath]: result }))
+      }
+      dataInstanceCount.current += 1
+      setFxFiles((items) => [...items, { instanceId: `fx-${dataInstanceCount.current}`, bucketId, path, name: path.split('/').pop(), datasetSettings: metadata, tsUnit: 'MILLISECONDS', dateFormat: 'DDMMYYYY' }])
+      setBacktestResult(null)
+      setBacktestError('')
+    } catch (error) {
+      setBacktestError(error.message)
+    }
   }
 
   function addManualDataFile(bucketId = activeBucketId) {
@@ -800,6 +1088,30 @@ function App() {
   function updateFeed(instanceId, key, value) {
     setDataFiles((items) => items.map((item) => item.instanceId === instanceId ? { ...item, [key]: value } : item))
     setBacktestResult(null)
+  }
+
+  function updateFxFeed(instanceId, key, value) {
+    setFxFiles((items) => items.map((item) => item.instanceId === instanceId ? { ...item, [key]: value } : item))
+    setBacktestResult(null)
+  }
+
+  async function updateFxPair(instanceId, key, value) {
+    const feed = fxFiles.find((item) => item.instanceId === instanceId)
+    if (!feed) return
+    const relativePath = feed.path.replace(/^\.\/data\//, '')
+    const nextSettings = { ...feed.datasetSettings, [key]: value }
+    setFxFiles((items) => items.map((item) => item.instanceId === instanceId ? { ...item, datasetSettings: nextSettings } : item))
+    setBacktestResult(null)
+    try {
+      const response = await fetch('/api/data/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...nextSettings, path: relativePath }) })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Could not save the FX currency pair.')
+      setDatasetMetadata((items) => ({ ...items, [relativePath]: result }))
+      setFxFiles((items) => items.map((item) => item.instanceId === instanceId ? { ...item, datasetSettings: result } : item))
+      setBacktestError('')
+    } catch (error) {
+      setBacktestError(error.message)
+    }
   }
 
   function toggleStrategyFeed(instanceId, feedId) {
@@ -822,6 +1134,7 @@ function App() {
     setBacktestBuckets(remaining)
     setBacktestStrategies((items) => items.filter((item) => item.bucketId !== bucketId))
     setDataFiles((items) => items.filter((item) => item.bucketId !== bucketId))
+    setFxFiles((items) => items.filter((item) => item.bucketId !== bucketId))
     if (activeBucketId === bucketId) setActiveBucketId(remaining[0].id)
     setBacktestResult(null)
   }
@@ -832,6 +1145,7 @@ function App() {
     setBacktestStrategies([])
     setExpandedBacktestStrategies({})
     setDataFiles([])
+    setFxFiles([])
     setManualDataPath('')
     setStrategyDropHoverBucket(null)
     setDataDropHoverBucket(null)
@@ -887,6 +1201,11 @@ function App() {
         setStrategyCatalog(catalog.strategies)
         setCompilation(state)
         setCompileSelection(Object.fromEntries(state.strategies.map((strategy) => [strategy.id, true])))
+        Promise.all(catalog.strategies.map(async (strategy) => {
+          const response = await fetch(`/api/strategies/presets?strategyId=${encodeURIComponent(strategy.id)}`)
+          if (!response.ok) return [strategy.id, { presets: [], lastPresetId: null }]
+          return [strategy.id, await response.json()]
+        })).then((entries) => { if (isCurrent) setStrategyPresets(Object.fromEntries(entries)) }).catch(() => {})
       })
       .catch(() => {
         if (isCurrent) setCompileError('Could not load C++ compilation status.')
@@ -952,6 +1271,45 @@ function App() {
     setItemDialogError('')
   }
 
+  async function openDatasetSettings(item) {
+    setDatasetSettingsError('')
+    try {
+      const response = await fetch(`/api/data/settings?path=${encodeURIComponent(item.path)}`)
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Could not load dataset settings.')
+      setDatasetSettingsDraft(result)
+      setDatasetSettingsDialog(item)
+      setDatasetMetadata((metadata) => ({ ...metadata, [item.path]: result }))
+      setItemDialog(null)
+    } catch (error) {
+      setItemDialogError(error.message)
+    }
+  }
+
+  function updateDatasetSettingsDraft(key, value) {
+    setDatasetSettingsDraft((settings) => ({ ...settings, [key]: value }))
+  }
+
+  async function saveDatasetSettings() {
+    if (!datasetSettingsDialog || !datasetSettingsDraft || savingDatasetSettings) return
+    setSavingDatasetSettings(true)
+    setDatasetSettingsError('')
+    try {
+      const response = await fetch('/api/data/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...datasetSettingsDraft, path: datasetSettingsDialog.path }) })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Could not save dataset settings.')
+      setDatasetMetadata((metadata) => ({ ...metadata, [result.path]: result }))
+      setDataFiles((items) => items.map((feed) => feed.path === `./data/${result.path}` ? { ...feed, datasetSettings: result } : feed))
+      setFxFiles((items) => items.map((feed) => feed.path === `./data/${result.path}` ? { ...feed, datasetSettings: result } : feed))
+      setDatasetSettingsDialog(null)
+      setBacktestResult(null)
+    } catch (error) {
+      setDatasetSettingsError(error.message)
+    } finally {
+      setSavingDatasetSettings(false)
+    }
+  }
+
   function openBacktestSettings() {
     setBacktestSettingsError('')
     if (backtestSettingsOpen) {
@@ -973,6 +1331,8 @@ function App() {
       fill_latency_seconds: Number(backtestSettingsDraft.fill_latency_seconds),
       capital_allocation: backtestSettingsDraft.capital_allocation,
       run_mode: backtestSettingsDraft.run_mode,
+      base_currency: backtestSettingsDraft.base_currency,
+      ignore_currency: Boolean(backtestSettingsDraft.ignore_currency),
     }
     setBacktestSettingsError('')
     try {
@@ -1436,6 +1796,7 @@ function App() {
               tsUnit: feed.tsUnit,
               dateFormat: feed.dateFormat,
             })),
+            fxFeeds: fxFiles.filter((feed) => feed.bucketId === bucket.id).map((feed) => ({ path: feed.path, tsUnit: feed.tsUnit, dateFormat: feed.dateFormat })),
             strategies: backtestStrategies.filter((strategy) => strategy.bucketId === bucket.id).map((strategy) => ({
               instanceId: strategy.instanceId,
               strategyId: strategy.id,
@@ -1724,7 +2085,21 @@ function App() {
                   bucket={bucket}
                   strategies={backtestStrategies.filter((strategy) => strategy.bucketId === bucket.id)}
                   dataFiles={dataFiles.filter((feed) => feed.bucketId === bucket.id)}
+                  fxFiles={fxFiles.filter((feed) => feed.bucketId === bucket.id)}
+                  baseCurrency={backtestConfig.base_currency || 'USD'}
+                  ignoreCurrency={backtestConfig.ignore_currency}
+                  fxDropHover={fxDropHoverBucket === bucket.id}
+                  onFxDragEnter={(bucketId, event) => { event.preventDefault(); setFxDropHoverBucket(bucketId) }}
+                  onFxDragLeave={(bucketId, event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFxDropHoverBucket((current) => current === bucketId ? null : current) }}
+                  onFxDrop={handleFxDrop}
+                  onRemoveFxFile={(instanceId) => { setFxFiles((items) => items.filter((feed) => feed.instanceId !== instanceId)); setBacktestResult(null) }}
+                  onUpdateFxFeed={updateFxFeed}
+                  onUpdateFxPair={updateFxPair}
                   strategyCatalog={strategyCatalog}
+                  strategyPresets={strategyPresets}
+                  presetMenuInstanceId={presetMenuInstanceId}
+                  onTogglePresetMenu={(instanceId) => setPresetMenuInstanceId((current) => current === instanceId ? null : instanceId)}
+                  onSelectPreset={selectStrategyPreset}
                   expandedStrategies={expandedBacktestStrategies}
                   selectedForSidebar={activeBucketId === bucket.id}
                   strategyDropHover={strategyDropHoverBucket === bucket.id}
@@ -1960,6 +2335,8 @@ function App() {
             {itemDialogAction === 'menu' ? (
               <div className="builder-dialog-options">
                 {itemDialog.type === 'directory' && <button className="builder-dialog-option" onClick={beginCreateItem} type="button"><span><strong>Create here</strong><small>Add a folder or file inside {itemDialog.name}.</small></span><span aria-hidden="true">›</span></button>}
+                {itemDialog.scope === 'data' && itemDialog.type === 'file' && <button className="builder-dialog-option" onClick={() => openDatasetSettings(itemDialog)} type="button"><span><strong>Dataset settings</strong><small>Set timezone, currency, or FX pair.</small></span><span aria-hidden="true">›</span></button>}
+                {itemDialog.strategyId && <button className="builder-dialog-option" onClick={() => { const strategy = strategyCatalog.find((entry) => entry.id === itemDialog.strategyId); setItemDialog(null); openStrategyPresets(strategy) }} type="button"><span><strong>Presets</strong><small>Manage saved configurations for this strategy.</small></span><span aria-hidden="true">›</span></button>}
                 {itemDialog.type === 'file' && <button className="builder-dialog-option" onClick={() => openWorkspacePreview(itemDialog)} type="button"><span><strong>View</strong><small>Preview this file in a window.</small></span><span aria-hidden="true">›</span></button>}
                 {!itemDialog.isRoot && <button className="builder-dialog-option" onClick={beginRenameItem} type="button"><span><strong>Rename</strong><small>Change this {itemDialog.type} name.</small></span><span aria-hidden="true">›</span></button>}
                 {itemDialog.type === 'file' && <button className="builder-dialog-option danger-dialog-option" onClick={() => { setDeleteItemError(''); setDeleteItemPrompt(itemDialog); setItemDialog(null) }} type="button"><span><strong>Remove file</strong><small>Delete this file from the workspace.</small></span><span aria-hidden="true">›</span></button>}
@@ -1980,6 +2357,9 @@ function App() {
           </section>
         </div>
       )}
+
+      <DatasetSettingsDialog draft={datasetSettingsDraft} error={datasetSettingsError} file={datasetSettingsDialog} onChange={updateDatasetSettingsDraft} onClose={() => setDatasetSettingsDialog(null)} onSave={saveDatasetSettings} saving={savingDatasetSettings} />
+      {presetManagerStrategy && <PresetManagerDialog initialData={presetManagerData} onClose={() => setPresetManagerStrategy(null)} onPersist={persistStrategyPresets} strategy={presetManagerStrategy} />}
 
       {deleteItemPrompt && (
         <div className="dialog-backdrop" onMouseDown={() => !isDeletingItem && setDeleteItemPrompt(null)}>

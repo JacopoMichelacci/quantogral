@@ -42,6 +42,9 @@ struct StrategyConfig {
 };
 
 
+template <typename Tin>
+class Backtester;
+
 struct StrategyContext {
     double opos = 0.0;
     double equity = 0.0;
@@ -67,6 +70,19 @@ struct StrategyContext {
         }
         return 0.0;
     }
+
+    double fixed_fractional_price_qty(double native_price, double equity_fraction) const {
+        return equity * equity_fraction / (native_price * account_currency_per_native_unit_);
+    }
+
+    double fixed_fractional_sl_qty(double native_risk_per_unit, double equity_fraction) const {
+        return equity * equity_fraction / (native_risk_per_unit * account_currency_per_native_unit_);
+    }
+
+private:
+    double account_currency_per_native_unit_ = 1.0;
+    template <typename Tin>
+    friend class Backtester;
 };
 
 
@@ -74,20 +90,6 @@ enum class SIZING_MODE {
     FIXED,
     FIXED_FRACTIONAL_PRICE,
     FIXED_FRACTIONAL_SL
-};
-
-
-class PositionSizer {
-public:
-    PositionSizer() = default;
-
-    double fixed_fractional_price(double equity, double price, double equity_pct) const {
-        return equity * equity_pct / price;
-    }
-
-    double fixed_fractional_sl(double equity, double sl_notional, double equity_pct) const {
-        return equity * equity_pct / sl_notional;
-    }
 };
 
 
@@ -130,9 +132,6 @@ protected:
 
     // base config
     StrategyConfig bconfig;
-
-    PositionSizer sizer;
-
 
     // resolves the right timestamp type at compile time
     long long resolve_ts(const Tin& input) {

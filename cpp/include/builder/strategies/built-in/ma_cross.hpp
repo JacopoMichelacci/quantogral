@@ -72,12 +72,12 @@ public:
             case SIZING_MODE::FIXED:
                 return 11;
             case SIZING_MODE::FIXED_FRACTIONAL_PRICE:
-                return this->sizer.fixed_fractional_price(ctx.equity, price, params.equity_pct);
+                return ctx.fixed_fractional_price_qty(price, params.equity_pct);
             case SIZING_MODE::FIXED_FRACTIONAL_SL:
                 if (!(params.slnot > 0.0)) {
                     throw std::invalid_argument("MAC fixed-fractional-SL sizing requires a positive slnot.");
                 }
-                return this->sizer.fixed_fractional_sl(ctx.equity, params.slnot, params.equity_pct);
+                return ctx.fixed_fractional_sl_qty(params.slnot, params.equity_pct);
             default:
                 throw std::invalid_argument("MAC unsupported sizing mode");
         }
