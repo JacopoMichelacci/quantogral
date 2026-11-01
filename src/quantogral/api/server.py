@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -30,31 +31,185 @@ BUILD_LOCK = threading.Lock()
 YAHOO_DOWNLOAD_JOBS: dict[str, dict[str, Any]] = {}
 YAHOO_DOWNLOAD_JOBS_LOCK = threading.Lock()
 
-STRATEGY_CATALOG = [{
-    "id": "ma_cross",
-    "name": "Moving Average Cross",
-    "file": "ma_cross.hpp",
-    "input": "OHLCV",
-    "baseConfig": [
-        {"key": "active", "label": "Strategy active", "type": "boolean", "default": True},
-        {"key": "long_active", "label": "Allow long positions", "type": "boolean", "default": True},
-        {"key": "short_active", "label": "Allow short positions", "type": "boolean", "default": True},
-        {"key": "stacking", "label": "Allow position stacking", "type": "boolean", "default": True},
-        {"key": "ts_unit", "label": "Numeric timestamp unit", "type": "select", "default": "MILLISECONDS", "options": ["SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"]},
-        {"key": "date_format", "label": "Ambiguous date format", "type": "select", "default": "DDMMYYYY", "options": ["DDMMYYYY", "MMDDYYYY"]},
-    ],
-    "parameters": [
-        {"key": "fast_len", "label": "Fast period", "type": "number", "default": 10, "min": 1, "step": 1},
-        {"key": "slow_len", "label": "Slow period", "type": "number", "default": 30, "min": 2, "step": 1},
-        {"key": "fast_price_field", "label": "Fast price field", "type": "select", "default": "CLOSE", "options": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]},
-        {"key": "slow_price_field", "label": "Slow price field", "type": "select", "default": "CLOSE", "options": ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]},
-        {"key": "slnot", "label": "Stop-loss amount (0 disables)", "type": "number", "default": -1, "step": 0.01},
-        {"key": "slpct", "label": "Stop-loss percent (0 disables)", "type": "number", "default": -1, "step": 0.01},
-        {"key": "pos_sizing_mode", "label": "Position sizing", "type": "select", "default": "FIXED", "options": ["FIXED", "FIXED_FRACTIONAL_PRICE"]},
-        {"key": "qty", "label": "Fixed quantity", "type": "number", "default": 1, "min": 0.000001, "step": 0.1},
-        {"key": "equity_pct", "label": "Equity fraction", "type": "number", "default": 0.05, "min": 0.000001, "max": 1, "step": 0.01},
-    ],
-}]
+STRATEGY_ROOT = CPP_ROOT / "include" / "builder" / "strategies"
+GENERATED_REGISTRY = BUILD_DIR / "quantogral_strategy_registry.generated.hpp"
+
+
+def discover_strategy_headers() -> dict[str, Path]:
+    """Find conventional OHLCV strategy classes and derive their configs from C++ fields."""
+    found: dict[str, Path] = {}
+    strategy_class = re.compile(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>")
+    if not STRATEGY_ROOT.is_dir():
+        return found
+    for header in sorted(STRATEGY_ROOT.rglob("*.hpp")):
+        if header.is_symlink() or "strategy_base.hpp" == header.name or "strategy_registry.hpp" == header.name:
+            continue
+        try:
+            source = header.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = strategy_class.search(source)
+        if not match:
+            continue
+        identifier = re.sub(r"[^a-zA-Z0-9_]+", "_", header.stem).strip("_").lower()
+        if identifier in found:
+            raise RuntimeError(f"Duplicate strategy ID '{identifier}' in {header} and {found[identifier]}.")
+        found[identifier] = header
+    return found
+
+
+def eligible_strategy_headers() -> dict[str, Path]:
+    """Return complete strategies; an in-progress or unsupported header won't break the app."""
+    eligible = {}
+    for identifier, header in discover_strategy_headers().items():
+        source = header.read_text(encoding="utf-8")
+        match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>", source)
+        try:
+            _strategy_config_fields(source, match.group(1), header)
+        except (RuntimeError, ValueError):
+            continue
+        eligible[identifier] = header
+    return eligible
+
+
+def _matching_brace(source: str, opening: int) -> int:
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise RuntimeError("Unclosed C++ brace while reading strategy configuration.")
+
+
+def _strategy_config_fields(source: str, class_name: str, header: Path) -> list[dict[str, Any]]:
+    class_match = re.search(rf"class\s+{re.escape(class_name)}\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>", source)
+    if not class_match:
+        raise RuntimeError(f"{header.name}: could not locate the strategy class body.")
+    class_start = source.find("{", class_match.start())
+    class_body = source[class_start + 1:_matching_brace(source, class_start)]
+    alias = re.search(r"\busing\s+Config\s*=\s*([A-Za-z_]\w*)\s*;", class_body)
+    if not alias:
+        raise RuntimeError(f"{header.name}: strategy must expose `using Config = YourConfigType;`.")
+    config_type = alias.group(1)
+    config_start_match = re.search(rf"\bstruct\s+{re.escape(config_type)}\s*\{{", source)
+    if not config_start_match:
+        raise RuntimeError(f"{header.name}: could not find the config struct `{config_type}`.")
+    config_start = source.find("{", config_start_match.start())
+    config_body = source[config_start + 1:_matching_brace(source, config_start)]
+    enum_types: dict[str, list[str]] = {}
+    for enum_match in re.finditer(r"enum\s+class\s+([A-Za-z_]\w*)[^\{]*\{([^}]*)\}", "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in (CPP_ROOT / "include").rglob("*.hpp"))):
+        enum_types[enum_match.group(1)] = [part.strip().split("=")[0].strip() for part in enum_match.group(2).split(",") if part.strip()]
+    fields: list[dict[str, Any]] = []
+    cpp_type_pattern = r"(?:unsigned\s+int|long\s+double|long\s+long|unsigned|short|int|long|float|double|bool|size_t|std::size_t|std::string|[A-Za-z_]\w*(?:::\w+)*)"
+    field_pattern = re.compile(rf"^\s*({cpp_type_pattern})\s+([A-Za-z_]\w*)\s*=\s*(.+?)\s*$", re.S)
+    declarations = re.split(r";", re.sub(r"/\*.*?\*/|//[^\n]*", "", config_body, flags=re.S))
+    for declaration in declarations:
+        if not declaration.strip() or declaration.lstrip().startswith("static_assert"):
+            continue
+        field = field_pattern.match(declaration)
+        if not field:
+            raise RuntimeError(f"{header.name}: config fields need a simple type, name, and default initializer: {declaration.strip()}")
+        cpp_type, key, default_expr = field.groups()
+        default_expr = default_expr.strip()
+        enum_name = cpp_type.split("::")[-1]
+        if enum_name in enum_types:
+            options = enum_types[enum_name]
+            default = default_expr.split("::")[-1]
+            if default not in options:
+                raise RuntimeError(f"{header.name}: `{key}` has an enum default not found in {enum_name}.")
+            field_type = "select"
+        elif cpp_type == "bool":
+            if default_expr.lower() not in {"true", "false"}:
+                raise RuntimeError(f"{header.name}: `{key}` boolean defaults must be `true` or `false`.")
+            options, field_type, default = None, "boolean", default_expr.lower() == "true"
+        elif cpp_type in {"std::string", "string"}:
+            options, field_type = None, "text"
+            try:
+                default = json.loads(default_expr)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(f"{header.name}: `{key}` string defaults must use a quoted literal.") from error
+        elif cpp_type in {"float", "double", "long double"}:
+            options, field_type = None, "number"
+            default = float(default_expr.rstrip("fFlL"))
+        elif cpp_type in {"short", "int", "long", "long long", "std::int8_t", "std::int16_t", "std::int32_t", "std::int64_t", "std::uint8_t", "std::uint16_t", "std::uint32_t", "std::uint64_t", "unsigned", "unsigned int", "size_t", "std::size_t"}:
+            options, field_type = None, "number"
+            default = int(default_expr.rstrip("uUlL"), 0)
+        else:
+            raise RuntimeError(f"{header.name}: automatic settings support bool, numeric, string, and enum fields; `{key}` uses `{cpp_type}`.")
+        item: dict[str, Any] = {"key": key, "type": field_type, "default": default, "_cppType": cpp_type}
+        if options is not None:
+            item["options"] = options
+        fields.append(item)
+    return fields
+
+
+def write_generated_registry(headers: list[Path]) -> None:
+    BUILD_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    all_headers = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in (CPP_ROOT / "include").rglob("*.hpp"))
+    enums: dict[str, list[str]] = {}
+    for match in re.finditer(r"enum\s+class\s+([A-Za-z_]\w*)[^\{]*\{([^}]*)\}", all_headers):
+        enums[match.group(1)] = [part.strip().split("=")[0].strip() for part in match.group(2).split(",") if part.strip()]
+    output = ["#pragma once", "#include <memory>", "#include <string>", "#include <stdexcept>", "#include \"builder/strategies/strategy_registry.hpp\""]
+    for header in headers:
+        output.append(f'#include "{header.relative_to(CPP_ROOT / "include").as_posix()}"')
+    for identifier, header in ((re.sub(r"[^a-zA-Z0-9_]+", "_", path.stem).strip("_").lower(), path) for path in headers):
+        source = header.read_text(encoding="utf-8")
+        class_match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>", source)
+        class_name = class_match.group(1)
+        fields = _strategy_config_fields(source, class_name, header)
+        config_alias = re.search(r"\busing\s+Config\s*=\s*([A-Za-z_]\w*)\s*;", source[source.find("{", class_match.start()):_matching_brace(source, source.find("{", class_match.start()))])
+        config_type = config_alias.group(1)
+        safe_id = re.sub(r"\W", "_", identifier)
+        factory = [f"inline std::unique_ptr<Strategy<OHLCVEvent>> qg_create_{safe_id}(const quantogral::StrategyValues& values) {{", f"    {config_type} config{{}};"]
+        for item in fields:
+            key = item["key"]
+            cpp_type = item.get("_cppType", "")
+            if item["type"] == "boolean":
+                factory.append(f'    config.{key} = quantogral::parse_bool_value(values, "{key}", {"true" if item["default"] else "false"});')
+            elif item["type"] == "number":
+                parse_fn = "std::stod" if any(t in cpp_type for t in ("float", "double")) else "std::stoll"
+                factory.append(f'    config.{key} = static_cast<decltype(config.{key})>({parse_fn}(quantogral::value_or(values, "{key}", "{item["default"]}")));')
+            elif item["type"] == "text":
+                factory.append(f'    config.{key} = quantogral::value_or(values, "{key}", {json.dumps(item["default"])});')
+            else:
+                enum_type = cpp_type
+                factory.append(f'    const auto qg_{key} = quantogral::value_or(values, "{key}", "{item["default"]}");')
+                for option_index, option in enumerate(enums[enum_type.split("::")[-1]]):
+                    branch = "if" if option_index == 0 else "else if"
+                    factory.append(f'    {branch} (qg_{key} == "{option}") config.{key} = {enum_type}::{option};')
+                factory.append(f'    else throw std::invalid_argument("Unsupported value for {key}: " + qg_{key});')
+        factory.extend([f'    return std::make_unique<{class_name}>(config, quantogral::make_base_config(values));', "}"])
+        output.extend(factory)
+        output.append(f'namespace {{ const bool qg_registered_{safe_id} = [] {{ quantogral::register_strategy({{"{identifier}", &qg_create_{safe_id}}}); return true; }}(); }}')
+    GENERATED_REGISTRY.write_text("\n".join(output) + "\n", encoding="utf-8")
+
+
+def strategy_catalog_from_headers() -> list[dict[str, Any]]:
+    catalog = []
+    base_fields = [
+        {"key": "active", "type": "boolean", "default": True},
+        {"key": "long_active", "type": "boolean", "default": True},
+        {"key": "short_active", "type": "boolean", "default": True},
+        {"key": "stacking", "type": "boolean", "default": True},
+        {"key": "ts_unit", "type": "select", "default": "MILLISECONDS", "options": ["SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"]},
+        {"key": "date_format", "type": "select", "default": "DDMMYYYY", "options": ["DDMMYYYY", "MMDDYYYY"]},
+    ]
+    for identifier, header in eligible_strategy_headers().items():
+        source = header.read_text(encoding="utf-8")
+        class_match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>", source)
+        fields = _strategy_config_fields(source, class_match.group(1), header)
+        catalog.append({
+            "id": identifier,
+            "name": " ".join(word.capitalize() for word in identifier.split("_")),
+            "file": header.relative_to(STRATEGY_ROOT.parent).as_posix(),
+            "input": "OHLCV",
+            "baseConfig": base_fields,
+            "parameters": [{key: value for key, value in field.items() if not key.startswith("_")} for field in fields],
+        })
+    return catalog
 
 
 def read_config() -> tuple[dict[str, Any], bool]:
@@ -331,13 +486,16 @@ def runner_is_current() -> bool:
     if not RUNNER_BINARY.is_file():
         return False
     sources = [path for path in CPP_ROOT.rglob("*") if path.is_file() and path.suffix in {".hpp", ".cpp"}]
-    return all(RUNNER_BINARY.stat().st_mtime_ns >= source.stat().st_mtime_ns for source in sources)
+    sources += list(STRATEGY_ROOT.rglob("*.hpp")) if STRATEGY_ROOT.is_dir() else []
+    sources.extend((GENERATED_REGISTRY, Path(__file__)))
+    return GENERATED_REGISTRY.is_file() and all(RUNNER_BINARY.stat().st_mtime_ns >= source.stat().st_mtime_ns for source in sources)
 
 
 def compile_runner(selected_ids: list[str]) -> dict[str, Any]:
-    supported_ids = {strategy["id"] for strategy in STRATEGY_CATALOG}
-    if not selected_ids or any(strategy_id not in supported_ids for strategy_id in selected_ids):
-        raise ValueError("Select at least one supported strategy.")
+    available = eligible_strategy_headers()
+    supported_ids = set(available)
+    if not selected_ids or len(set(selected_ids)) != len(selected_ids) or any(strategy_id not in supported_ids for strategy_id in selected_ids):
+        raise ValueError("Select at least one discovered C++ strategy.")
 
     compiler = shlex.split(os.environ.get("CXX", "c++"))
     if not compiler or shutil.which(compiler[0]) is None:
@@ -345,10 +503,11 @@ def compile_runner(selected_ids: list[str]) -> dict[str, Any]:
 
     BUILD_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     with BUILD_LOCK:
+        write_generated_registry([available[strategy_id] for strategy_id in selected_ids])
         with tempfile.NamedTemporaryFile(dir=BUILD_DIR, prefix="quantogral-backtest-", delete=False) as temporary_file:
             temporary_binary = Path(temporary_file.name)
         command = compiler + [
-            "-std=c++20", "-O2", f"-I{CPP_ROOT / 'include'}",
+            "-std=c++20", "-O2", f"-I{CPP_ROOT / 'include'}", f"-I{BUILD_DIR}",
             str(RUNNER_SOURCE), *(str(source) for source in CORE_SOURCES),
             "-o", str(temporary_binary),
         ]
@@ -368,15 +527,7 @@ def compile_runner(selected_ids: list[str]) -> dict[str, Any]:
 
 
 def get_strategy_catalog() -> list[dict[str, Any]]:
-    if runner_is_current():
-        try:
-            result = subprocess.run([str(RUNNER_BINARY), "--catalog"], capture_output=True, text=True, timeout=10, check=True)
-            catalog = json.loads(result.stdout).get("strategies", [])
-            if catalog:
-                return catalog
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-            pass
-    return STRATEGY_CATALOG
+    return strategy_catalog_from_headers()
 
 
 def resolve_data_file(raw_path: Any) -> Path:
@@ -429,40 +580,177 @@ def prepare_parquet_csv(source: Path, destination: Path) -> None:
 def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     if not runner_is_current():
         raise RuntimeError("Compile the strategies from Builder settings before running a backtest.")
-    if payload.get("strategyId") != "ma_cross":
-        raise ValueError("This build currently supports Moving Average Cross only.")
-
-    data_path = resolve_data_file(payload.get("dataPath"))
-    base = payload.get("baseConfig", {})
-    params = payload.get("parameters", {})
     backtest = payload.get("backtestConfig", {})
     def value(source: dict[str, Any], key: str, default: Any) -> Any:
         return source.get(key, default) if isinstance(source, dict) else default
 
-    temporary_data = None
-    runner_data_path = data_path
-    if data_path.suffix.lower() in {".parquet", ".pq"}:
-        temporary_data = tempfile.TemporaryDirectory(prefix="quantogral-parquet-", dir=BUILD_DIR)
-        runner_data_path = Path(temporary_data.name) / "market_data.csv"
-        try:
-            prepare_parquet_csv(data_path, runner_data_path)
-        except Exception:
-            temporary_data.cleanup()
-            raise
+    buckets = payload.get("buckets")
+    if buckets is None and payload.get("strategyId"):
+        # Keep older local clients working while they refresh to the bucket UI.
+        buckets = [{
+            "id": "bucket-1",
+            "feeds": [{"id": "feed-1", "path": payload.get("dataPath")}],
+            "strategies": [{
+                "instanceId": "strategy-1", "strategyId": payload.get("strategyId"), "feedIds": ["feed-1"],
+                "baseConfig": payload.get("baseConfig", {}), "parameters": payload.get("parameters", {}),
+            }],
+        }]
+    if not isinstance(buckets, list) or not buckets:
+        raise ValueError("Add at least one complete bucket with a strategy and data feed.")
+    initial_capital = float(value(backtest, "initial_capital", 100000))
+    cost_bps = float(value(backtest, "cost_bps", 0))
+    allocation_mode = value(backtest, "capital_allocation", "SHARED")
+    if allocation_mode not in {"SHARED", "EQUAL_PER_STRATEGY"}:
+        raise ValueError("Capital allocation must be SHARED or EQUAL_PER_STRATEGY.")
+    strategy_catalog = {item["id"]: item for item in strategy_catalog_from_headers()}
 
-    arguments = [
-        str(RUNNER_BINARY), "--run", str(runner_data_path),
-        str(float(value(backtest, "initial_capital", 100000))), str(float(value(backtest, "cost_bps", 0))),
-        *(str(bool(value(base, key, default))).lower() for key, default in (
-            ("active", True), ("long_active", True), ("short_active", True), ("stacking", True),
-        )),
-        str(value(base, "ts_unit", "MILLISECONDS")), str(value(base, "date_format", "DDMMYYYY")),
-        str(int(value(params, "fast_len", 10))), str(int(value(params, "slow_len", 30))),
-        str(value(params, "fast_price_field", "CLOSE")), str(value(params, "slow_price_field", "CLOSE")),
-        str(float(value(params, "slnot", -1))), str(float(value(params, "slpct", -1))),
-        str(value(params, "pos_sizing_mode", "FIXED")), str(float(value(params, "qty", 1))),
-        str(float(value(params, "equity_pct", 0.05))),
-    ]
+    arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, "0", str(len(buckets))]
+    temp_dirs: list[Any] = []
+    prepared_buckets: list[dict[str, Any]] = []
+    instance_ids: set[str] = set()
+    bucket_ids: set[str] = set()
+    try:
+        for bucket_index, raw_bucket in enumerate(buckets):
+            if not isinstance(raw_bucket, dict):
+                raise ValueError("Every backtest bucket must be an object.")
+            bucket_id = raw_bucket.get("id")
+            feeds = raw_bucket.get("feeds")
+            strategies = raw_bucket.get("strategies")
+            if not isinstance(bucket_id, str) or not bucket_id.strip():
+                raise ValueError("Every backtest bucket needs an ID.")
+            if bucket_id in bucket_ids:
+                raise ValueError("Bucket IDs must be unique across the backtest plan.")
+            bucket_ids.add(bucket_id)
+            if not isinstance(feeds, list) or not feeds or not isinstance(strategies, list) or not strategies:
+                raise ValueError(f"Bucket {bucket_id} needs at least one feed and one strategy.")
+            arguments.extend([bucket_id, str(len(feeds))])
+            prepared_feeds = []
+            feed_ids: set[str] = set()
+            for feed_index, feed in enumerate(feeds):
+                if not isinstance(feed, dict):
+                    raise ValueError(f"Bucket {bucket_id} has an invalid data feed.")
+                feed_id = feed.get("id")
+                if not isinstance(feed_id, str) or not feed_id.strip() or feed_id in feed_ids:
+                    raise ValueError(f"Bucket {bucket_id} data feed IDs must be non-empty and unique.")
+                feed_ids.add(feed_id)
+                data_path = resolve_data_file(feed.get("path"))
+                runner_data_path = data_path
+                if data_path.suffix.lower() in {".parquet", ".pq"}:
+                    temp_dir = tempfile.TemporaryDirectory(prefix="quantogral-parquet-", dir=BUILD_DIR)
+                    temp_dirs.append(temp_dir)
+                    runner_data_path = Path(temp_dir.name) / f"feed-{feed_index}.csv"
+                    prepare_parquet_csv(data_path, runner_data_path)
+                ts_unit = feed.get("tsUnit", "MILLISECONDS")
+                date_format = feed.get("dateFormat", "DDMMYYYY")
+                if ts_unit not in {"SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"}:
+                    raise ValueError(f"Feed {feed_id} has an unsupported timestamp unit.")
+                if date_format not in {"DDMMYYYY", "MMDDYYYY"}:
+                    raise ValueError(f"Feed {feed_id} has an unsupported date format.")
+                arguments.extend([feed_id, str(runner_data_path), ts_unit, date_format])
+                prepared_feeds.append({"id": feed_id, "path": str(data_path), "name": data_path.name, "tsUnit": ts_unit, "dateFormat": date_format})
+
+            arguments.append(str(len(strategies)))
+            prepared_strategies = []
+            for strategy in strategies:
+                if not isinstance(strategy, dict):
+                    raise ValueError(f"Bucket {bucket_id} contains an invalid strategy instance.")
+                instance_id = strategy.get("instanceId")
+                strategy_id = strategy.get("strategyId")
+                connected_feeds = strategy.get("feedIds")
+                if not isinstance(instance_id, str) or not instance_id.strip() or instance_id in instance_ids:
+                    raise ValueError("Strategy instance IDs must be non-empty and unique across the plan.")
+                instance_ids.add(instance_id)
+                if not isinstance(strategy_id, str) or not strategy_id.strip():
+                    raise ValueError(f"Strategy instance {instance_id} has no strategy type.")
+                if not isinstance(connected_feeds, list) or not connected_feeds or any(not isinstance(feed_id, str) or feed_id not in feed_ids for feed_id in connected_feeds):
+                    raise ValueError(f"Strategy instance {instance_id} must connect to at least one feed in its bucket.")
+                base = strategy.get("baseConfig", {})
+                params = strategy.get("parameters", {})
+                values = {**(base if isinstance(base, dict) else {}), **(params if isinstance(params, dict) else {})}
+                arguments.extend([instance_id, strategy_id, str(len(connected_feeds)), *connected_feeds, str(len(values))])
+                for key, item in values.items():
+                    if not isinstance(key, str) or not key or "=" in key:
+                        raise ValueError(f"Strategy instance {instance_id} has an invalid config field name.")
+                    if isinstance(item, bool):
+                        item = str(item).lower()
+                    arguments.append(f"{key}={item}")
+                strategy_meta = strategy_catalog.get(strategy_id)
+                if strategy_meta is None:
+                    raise ValueError(f"Strategy {strategy_id} is not a supported OHLCV strategy.")
+                prepared_strategies.append({"instanceId": instance_id, "strategyId": strategy_id, "name": strategy_meta["name"]})
+            prepared_buckets.append({"id": bucket_id, "feeds": prepared_feeds, "strategies": prepared_strategies})
+
+        try:
+            result = subprocess.run(arguments, capture_output=True, text=True, timeout=300, check=False)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("The C++ backtest exceeded the 5-minute time limit.") from error
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or "C++ backtest failed.").strip()[-4000:])
+        output = json.loads(result.stdout)
+    finally:
+        for temp_dir in temp_dirs:
+            temp_dir.cleanup()
+
+    output_buckets = output.get("buckets", [])
+    for bucket_index, bucket in enumerate(output_buckets):
+        bucket["feeds"] = prepared_buckets[bucket_index]["feeds"]
+        strategy_metadata = {item["instanceId"]: item for item in prepared_buckets[bucket_index]["strategies"]}
+        for strategy in bucket.get("strategies", []):
+            metadata = strategy_metadata[strategy["instanceId"]]
+            strategy["strategyId"] = metadata["strategyId"]
+            strategy["name"] = metadata["name"]
+        equity = bucket.get("equityCurve", [])
+        peak = initial_capital
+        max_drawdown = 0.0
+        for point in equity:
+            peak = max(peak, point)
+            if peak > 0:
+                max_drawdown = min(max_drawdown, point / peak - 1.0)
+        bucket["metrics"] = {
+            "initialEquity": initial_capital,
+            "finalEquity": equity[-1] if equity else initial_capital,
+            "returnPct": (((equity[-1] if equity else initial_capital) / initial_capital) - 1.0) * 100.0 if initial_capital else 0.0,
+            "maxDrawdownPct": max_drawdown * 100.0,
+            "orders": sum(len(strategy.get("orders", [])) for strategy in bucket.get("strategies", [])),
+        }
+    output["inputRows"] = int(output.get("inputRows", 0))
+    output["buckets"] = output_buckets
+    initial_total = initial_capital * len(output_buckets)
+    aggregate_values: dict[int, list[tuple[int, float]]] = {}
+    orders = []
+    for bucket_index, bucket in enumerate(output_buckets):
+        for timestamp, equity in zip(bucket.get("equityTimestamps", []), bucket.get("equityCurve", [])):
+            aggregate_values.setdefault(timestamp, []).append((bucket_index, equity))
+        for strategy in bucket.get("strategies", []):
+            for order in strategy.get("orders", []):
+                orders.append({**order, "bucketId": bucket["id"], "instanceId": strategy["instanceId"], "strategyId": strategy["strategyId"], "strategyName": strategy["name"]})
+    current_equities = [initial_capital] * len(output_buckets)
+    aggregate_curve = []
+    aggregate_timestamps = []
+    for timestamp in sorted(aggregate_values):
+        for bucket_index, equity in aggregate_values[timestamp]:
+            current_equities[bucket_index] = equity
+        aggregate_timestamps.append(timestamp)
+        aggregate_curve.append(sum(current_equities))
+    orders.sort(key=lambda order: (order["timestamp"], order["bucketId"], order["instanceId"], order["id"]))
+    peak = initial_total
+    max_drawdown = 0.0
+    for point in aggregate_curve:
+        peak = max(peak, point)
+        if peak > 0:
+            max_drawdown = min(max_drawdown, point / peak - 1.0)
+    final_total = aggregate_curve[-1] if aggregate_curve else initial_total
+    output["equityCurve"] = aggregate_curve
+    output["equityTimestamps"] = aggregate_timestamps
+    output["orders"] = orders
+    output["metrics"] = {
+        "initialEquity": initial_total,
+        "finalEquity": final_total,
+        "returnPct": ((final_total / initial_total) - 1.0) * 100.0 if initial_total else 0.0,
+        "maxDrawdownPct": max_drawdown * 100.0,
+        "orders": len(orders),
+    }
+    return output
     try:
         result = subprocess.run(arguments, capture_output=True, text=True, timeout=300, check=False)
     except subprocess.TimeoutExpired as error:
@@ -594,17 +882,23 @@ class ConfigHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/strategies":
-            self.send_json({"strategies": get_strategy_catalog()})
+            try:
+                self.send_json({"strategies": get_strategy_catalog()})
+            except (RuntimeError, ValueError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if self.path == "/api/compilation":
-            current = runner_is_current()
-            self.send_json({
-                "compiled": RUNNER_BINARY.is_file(),
-                "current": current,
-                "strategies": get_strategy_catalog(),
-                "message": "Engine is ready." if current else "Compile registered strategies to enable backtests.",
-            })
+            try:
+                current = runner_is_current()
+                self.send_json({
+                    "compiled": RUNNER_BINARY.is_file(),
+                    "current": current,
+                    "strategies": get_strategy_catalog(),
+                    "message": "Engine is ready." if current else "Compile discovered strategies to enable backtests.",
+                })
+            except (RuntimeError, ValueError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
         if self.path != "/api/config":
@@ -677,7 +971,7 @@ class ConfigHandler(BaseHTTPRequestHandler):
         if self.path == "/api/compilation":
             mode = payload.get("mode")
             if mode == "all":
-                selected = [strategy["id"] for strategy in STRATEGY_CATALOG]
+                selected = list(eligible_strategy_headers())
             elif mode == "selected":
                 selected = payload.get("strategyIds", [])
             else:

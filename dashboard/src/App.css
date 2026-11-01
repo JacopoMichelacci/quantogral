@@ -274,6 +274,24 @@ code { color: #b8d8fa; }
 .strategy-config-details .config-section-heading { margin-bottom: 0; }
 .data-file-row { display: flex; min-width: 0; min-height: 38px; align-items: center; gap: 8px; padding: 4px 7px; border: 1px solid #292d32; border-radius: 6px; background: #0e1012; }
 .data-file-row .tree-icon { width: 13px; height: 15px; flex: 0 0 13px; }
+.backtest-buckets-toolbar, .backtest-bucket-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.backtest-buckets-toolbar { margin: 4px 0 2px; }
+.backtest-buckets-toolbar h2, .backtest-bucket-heading h2 { margin: 3px 0 0; color: #e8edf1; font-size: 1rem; }
+.backtest-buckets-toolbar p { margin: 4px 0 0; color: #89929b; font-size: .76rem; }
+.backtest-bucket-wrap { position: relative; display: grid; gap: 8px; }
+.backtest-bucket { display: grid; gap: 10px; padding: 12px; border: 1px solid #343b42; border-radius: 9px; background: #0e1012; }
+.backtest-bucket-heading { min-height: 38px; }
+.bucket-sidebar-select { flex: 0 0 auto; padding: 6px 9px; color: #8b969f; font-size: .7rem; }
+.bucket-sidebar-select.is-selected { border-color: #3f78a7; color: #a9d3f6; background: #14212c; }
+.bucket-remove-button { justify-self: end; border: 0; padding: 2px 5px; color: #858e96; background: transparent; font-size: .68rem; }
+.bucket-remove-button:hover { color: #efaaaa; }
+.feed-subscription-list { display: grid; gap: 5px; }
+.feed-subscription-option { display: grid; grid-template-columns: 16px minmax(90px, auto) minmax(0, 1fr); align-items: center; gap: 8px; color: #d2d8dd; font-size: .74rem; }
+.feed-subscription-option small { overflow: hidden; color: #78838c; text-overflow: ellipsis; white-space: nowrap; }
+.bucket-feed-row { flex-wrap: wrap; }
+.bucket-feed-row .data-file-path { min-width: 140px; }
+.feed-setting { display: grid; gap: 3px; color: #7f8991; font-size: .62rem; }
+.feed-setting select { max-width: 135px; min-height: 28px; border: 1px solid #353b42; border-radius: 4px; padding: 3px 6px; color: #dce2e7; background: #0c0e10; font-size: .68rem; }
 .data-file-name { overflow: hidden; max-width: 190px; color: #dbe0e4; font-size: .77rem; text-overflow: ellipsis; white-space: nowrap; }
 .data-file-path { overflow: hidden; flex: 1; color: #75808a; font-size: .69rem; text-overflow: ellipsis; white-space: nowrap; }
 .manual-data-entry { display: flex; gap: 7px; }
@@ -297,6 +315,14 @@ code { color: #b8d8fa; }
 .run-backtest-button { justify-self: start; min-width: 150px; }
 .run-backtest-button:disabled, .compile-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .backtest-results { margin-top: 24px; }
+.bucket-result-list { display: grid; gap: 8px; margin: 12px 0 16px; }
+.bucket-result-card { display: grid; gap: 9px; padding: 11px; border: 1px solid #292d32; border-radius: 7px; background: #0d0f11; }
+.bucket-result-card .config-section-heading { margin: 0; }
+.bucket-result-card h3 { margin: 0; color: #dfe5e9; font-size: .82rem; }
+.bucket-result-details { display: flex; flex-wrap: wrap; gap: 16px; color: #8c969e; font-size: .72rem; }
+.bucket-result-details strong { margin-left: 4px; color: #e6ebef; font-size: .78rem; }
+.bucket-result-strategies { display: flex; flex-wrap: wrap; gap: 8px 14px; color: #b3bdc5; font-size: .7rem; }
+.bucket-result-strategies code { color: #7d8992; }
 .result-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; margin-bottom: 14px; }
 .result-metrics > div { display: grid; gap: 5px; padding: 10px; border: 1px solid #292d32; border-radius: 6px; background: #0d0f11; }
 .result-metrics span { color: #89929b; font-size: .72rem; }
@@ -473,6 +499,18 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .orders-table th { color: #68737c; }
 .app-shell[data-theme="light"] .result-metrics strong,
 .app-shell[data-theme="light"] .orders-table td { color: #283139; }
+.app-shell[data-theme="light"] .backtest-buckets-toolbar h2,
+.app-shell[data-theme="light"] .backtest-bucket-heading h2,
+.app-shell[data-theme="light"] .bucket-result-card h3 { color: #293138; }
+.app-shell[data-theme="light"] .backtest-buckets-toolbar p,
+.app-shell[data-theme="light"] .bucket-result-details,
+.app-shell[data-theme="light"] .bucket-result-strategies { color: #68737c; }
+.app-shell[data-theme="light"] .backtest-bucket,
+.app-shell[data-theme="light"] .bucket-result-card { border-color: #d8dde2; background: #fff; }
+.app-shell[data-theme="light"] .feed-subscription-option,
+.app-shell[data-theme="light"] .bucket-result-details strong { color: #35414a; }
+.app-shell[data-theme="light"] .feed-setting select { border-color: #cbd2d8; color: #293138; background: #fff; }
+.app-shell[data-theme="light"] .bucket-sidebar-select.is-selected { border-color: #86b6da; color: #285c83; background: #edf6fc; }
 .app-shell[data-theme="light"] .orders-table th,
 .app-shell[data-theme="light"] .orders-table td { border-color: #e1e5e8; }
 .app-shell[data-theme="light"] .theme-options { border-color: #cbd2d8; background: #f0f2f4; }

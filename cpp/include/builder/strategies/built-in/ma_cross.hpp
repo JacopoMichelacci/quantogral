@@ -22,11 +22,12 @@ struct MACConfig {
     double qty = 1.0;
     double equity_pct = 0.05;
 };
-
 class MAC : public Strategy<OHLCVEvent> {
 public:
-    MAC(std::string name, const MACConfig& params_, StrategyConfig base_config = {})
-        : Strategy<OHLCVEvent>(detail::resolve_name(name, __FILE__), base_config),
+    using Config = MACConfig;
+
+    MAC(const MACConfig& params_, StrategyConfig base_config = {})
+        : Strategy<OHLCVEvent>(detail::resolve_name("", __FILE__), base_config),
           params(params_),
           fast_sma(params_.fast_len, 2),
           slow_sma(params_.slow_len, 2) {
@@ -72,6 +73,11 @@ public:
                 return params.qty;
             case SIZING_MODE::FIXED_FRACTIONAL_PRICE:
                 return this->sizer.fixed_fractional_price(ctx.equity, price, params.equity_pct);
+            case SIZING_MODE::FIXED_FRACTIONAL_SL:
+                if (!(params.slnot > 0.0)) {
+                    throw std::invalid_argument("MAC fixed-fractional-SL sizing requires a positive slnot.");
+                }
+                return this->sizer.fixed_fractional_sl(ctx.equity, params.slnot, params.equity_pct);
             default:
                 throw std::invalid_argument("MAC unsupported sizing mode");
         }

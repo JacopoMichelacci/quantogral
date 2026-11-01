@@ -78,9 +78,10 @@ function loadBacktestSettings() {
     return {
       initial_capital: Number.isFinite(Number(saved.initial_capital)) ? Number(saved.initial_capital) : 100000,
       cost_bps: Number.isFinite(Number(saved.cost_bps)) ? Number(saved.cost_bps) : 0,
+      capital_allocation: saved.capital_allocation === 'EQUAL_PER_STRATEGY' ? 'EQUAL_PER_STRATEGY' : 'SHARED',
     }
   } catch {
-    return { initial_capital: 100000, cost_bps: 0 }
+    return { initial_capital: 100000, cost_bps: 0, capital_allocation: 'SHARED' }
   }
 }
 
@@ -142,7 +143,7 @@ function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelect
 
   if (node.type !== 'directory') {
     const isStrategy = node.type === 'script' && node.name.toLowerCase().endsWith('.hpp') && nodeKey.includes('/strategies/')
-    const strategy = isStrategy ? strategies.find((item) => item.file === node.name) : null
+    const strategy = isStrategy ? strategies.find((item) => item.file === relativePath || item.file.split('/').pop() === node.name) : null
     const isDataFile = node.type === 'file' && nodeKey.startsWith('data/') && ['.csv', '.parquet', '.pq'].includes(node.name.split('.').pop()?.toLowerCase().replace(/^/, '.'))
     const suffix = `.${node.name.split('.').pop()?.toLowerCase()}`
     const isEditableFile = isDataFile || ['.hpp', '.h', '.cpp', '.cc', '.cxx', '.c', '.py', '.txt', '.md', '.json', '.yaml', '.yml', '.toml', '.ini', '.sh'].includes(suffix)
@@ -208,18 +209,20 @@ function ConfigField({ field, value, onChange }) {
     return (
       <label className="config-toggle">
         <input checked={Boolean(value)} onChange={(event) => onChange(field.key, event.target.checked)} type="checkbox" />
-        <span>{field.label}</span>
+        <span>{field.label || field.key}</span>
       </label>
     )
   }
 
   return (
     <label className="config-field">
-      <span>{field.label}</span>
+      <span>{field.label || field.key}</span>
       {field.type === 'select' ? (
         <select onChange={(event) => onChange(field.key, event.target.value)} value={value ?? field.default}>
           {field.options.map((option) => <option key={option} value={option}>{option.replaceAll('_', ' ')}</option>)}
         </select>
+      ) : field.type === 'text' ? (
+        <input onChange={(event) => onChange(field.key, event.target.value)} type="text" value={value ?? field.default} />
       ) : (
         <input
           max={field.max}
@@ -231,6 +234,101 @@ function ConfigField({ field, value, onChange }) {
         />
       )}
     </label>
+  )
+}
+
+function BacktestBucketPanel({
+  bucket, strategies, dataFiles, strategyCatalog, expandedStrategies, selectedForSidebar,
+  strategyDropHover, dataDropHover, manualDataPath, onSelectBucket, onAddStrategy,
+  onStrategyDragEnter, onStrategyDragLeave, onStrategyDrop, onDataDragEnter,
+  onDataDragLeave, onDataDrop, onToggleStrategy, onRemoveStrategy,
+  onToggleFeed, onUpdateStrategy, onRemoveFeed, onUpdateFeed,
+  onManualPathChange, onManualPathKeyDown, onAddManualPath,
+}) {
+  return (
+    <section className="backtest-bucket">
+      <div className="backtest-bucket-heading">
+        <div><span className="eyebrow">BACKTEST BUCKET</span><h2>{bucket.name}</h2></div>
+        <button className={`secondary-button bucket-sidebar-select ${selectedForSidebar ? 'is-selected' : ''}`} onClick={() => onSelectBucket(bucket.id)} type="button">
+          {selectedForSidebar ? 'Selected for sidebar adds' : 'Use for sidebar adds'}
+        </button>
+      </div>
+
+      <section className="config-section assembly-section">
+        <div className="config-section-heading"><h2>Strategies</h2><span>{strategies.length} added</span></div>
+        <div
+          className={`assembly-drop-target strategy-assembly-target ${strategyDropHover ? 'is-drag-hovering' : ''}`}
+          onDragEnter={(event) => onStrategyDragEnter(bucket.id, event)}
+          onDragLeave={(event) => onStrategyDragLeave(bucket.id, event)}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => onStrategyDrop(bucket.id, event)}
+        >
+          <span>Drop strategies here from Builder</span>
+          {strategyCatalog.map((strategy) => <button className="assembly-add-button" key={strategy.id} onClick={() => onAddStrategy(strategy, bucket.id)} type="button">+ {strategy.name}</button>)}
+        </div>
+        {strategies.length > 0 && <div className="assembly-list">
+          {strategies.map((strategy) => {
+            const expanded = Boolean(expandedStrategies[strategy.instanceId])
+            return (
+              <article className="strategy-config-card" key={strategy.instanceId}>
+                <div className="strategy-config-row">
+                  <button aria-expanded={expanded} aria-controls={`strategy-config-${strategy.instanceId}`} className="strategy-config-toggle" onClick={() => onToggleStrategy(strategy.instanceId)} type="button">
+                    <span className="tree-chevron">{expanded ? '⌄' : '›'}</span><strong>{strategy.name}</strong><span className="strategy-config-id" title="Strategy instance ID">{strategy.instanceId}</span>
+                  </button>
+                  <button aria-label={`Remove ${strategy.name}`} className="remove-item-button" onClick={() => onRemoveStrategy(strategy.instanceId)} type="button">×</button>
+                </div>
+                {expanded && <div className="strategy-config-details" id={`strategy-config-${strategy.instanceId}`}>
+                  <section>
+                    <div className="config-section-heading"><h3>Connected feeds</h3><span>{strategy.feedIds.length} selected</span></div>
+                    {dataFiles.length ? <div className="feed-subscription-list">
+                      {dataFiles.map((feed) => <label className="feed-subscription-option" key={feed.instanceId}>
+                        <input checked={strategy.feedIds.includes(feed.instanceId)} onChange={() => onToggleFeed(strategy.instanceId, feed.instanceId)} type="checkbox" />
+                        <span>{feed.name}</span><small title={feed.path}>{feed.path}</small>
+                      </label>)}
+                    </div> : <p className="input-help">Add a data feed to this bucket to connect it to the strategy.</p>}
+                  </section>
+                  <section>
+                    <div className="config-section-heading"><h3>Base settings</h3></div>
+                    <div className="config-grid config-toggle-grid">
+                      {strategy.baseConfig.map((field) => <ConfigField key={field.key} field={field} value={strategy.baseConfigDraft[field.key]} onChange={(key, value) => onUpdateStrategy(strategy.instanceId, 'baseConfigDraft', key, value)} />)}
+                    </div>
+                  </section>
+                  <section>
+                    <div className="config-section-heading"><h3>{strategy.name} settings</h3></div>
+                    <div className="config-grid">
+                      {strategy.parameters.map((field) => <ConfigField key={field.key} field={field} value={strategy.strategyConfigDraft[field.key]} onChange={(key, value) => onUpdateStrategy(strategy.instanceId, 'strategyConfigDraft', key, value)} />)}
+                    </div>
+                  </section>
+                </div>}
+              </article>
+            )
+          })}
+        </div>}
+      </section>
+
+      <section className="config-section assembly-section">
+        <div className="config-section-heading"><h2>Data feeds</h2><span>{dataFiles.length} added · CSV or Parquet</span></div>
+        <div
+          className={`assembly-drop-target data-assembly-target ${dataDropHover ? 'is-drag-hovering' : ''}`}
+          onDragEnter={(event) => onDataDragEnter(bucket.id, event)}
+          onDragLeave={(event) => onDataDragLeave(bucket.id, event)}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => onDataDrop(bucket.id, event)}
+        >Drop data feeds here from the project explorer</div>
+        {dataFiles.length > 0 && <div className="assembly-list data-file-list">
+          {dataFiles.map((feed) => <div className="data-file-row bucket-feed-row" key={feed.instanceId}>
+            <ScriptIcon /><span className="data-file-name" title={feed.path}>{feed.name}</span><span className="data-file-path">{feed.path}</span>
+            <label className="feed-setting"><span>Numeric time</span><select onChange={(event) => onUpdateFeed(feed.instanceId, 'tsUnit', event.target.value)} value={feed.tsUnit}><option>SECONDS</option><option>MILLISECONDS</option><option>MICROSECONDS</option><option>NANOSECONDS</option></select></label>
+            <label className="feed-setting"><span>Date order</span><select onChange={(event) => onUpdateFeed(feed.instanceId, 'dateFormat', event.target.value)} value={feed.dateFormat}><option>DDMMYYYY</option><option>MMDDYYYY</option></select></label>
+            <button aria-label={`Remove ${feed.name}`} className="remove-item-button" onClick={() => onRemoveFeed(feed.instanceId)} type="button">×</button>
+          </div>)}
+        </div>}
+        <div className="manual-data-entry">
+          <input aria-label={`Market-data path for ${bucket.name}`} onChange={(event) => onManualPathChange(event.target.value)} onKeyDown={(event) => onManualPathKeyDown(bucket.id, event)} placeholder="Or enter a CSV / Parquet path" spellCheck="false" type="text" value={manualDataPath} />
+          <button className="secondary-button" disabled={!manualDataPath.trim()} onClick={() => onAddManualPath(bucket.id)} type="button">Add feed</button>
+        </div>
+      </section>
+    </section>
   )
 }
 
@@ -261,6 +359,8 @@ function App() {
   const [unsavedPromptError, setUnsavedPromptError] = useState('')
   const [pendingEditorAction, setPendingEditorAction] = useState(null)
   const [strategyCatalog, setStrategyCatalog] = useState([])
+  const [backtestBuckets, setBacktestBuckets] = useState([{ id: 'bucket-1', name: 'Bucket 1' }])
+  const [activeBucketId, setActiveBucketId] = useState('bucket-1')
   const [backtestStrategies, setBacktestStrategies] = useState([])
   const [expandedBacktestStrategies, setExpandedBacktestStrategies] = useState({})
   const [dataFiles, setDataFiles] = useState([])
@@ -272,12 +372,11 @@ function App() {
   const [compileError, setCompileError] = useState('')
   const [compileSuccessNotice, setCompileSuccessNotice] = useState(null)
   const [isCompiling, setIsCompiling] = useState(false)
-  const [isDragHovering, setIsDragHovering] = useState(false)
-  const [isDataDragHovering, setIsDataDragHovering] = useState(false)
-  const dragEnterCount = useRef(0)
-  const dataDragEnterCount = useRef(0)
+  const [strategyDropHoverBucket, setStrategyDropHoverBucket] = useState(null)
+  const [dataDropHoverBucket, setDataDropHoverBucket] = useState(null)
   const strategyInstanceCount = useRef(0)
   const dataInstanceCount = useRef(0)
+  const bucketInstanceCount = useRef(1)
   const fileOpenRequest = useRef(0)
   const editorGutterRef = useRef(null)
   const resizePointerId = useRef(null)
@@ -288,7 +387,7 @@ function App() {
   const [backtestError, setBacktestError] = useState('')
   const [isRunningBacktest, setIsRunningBacktest] = useState(false)
   const [backtestSettingsOpen, setBacktestSettingsOpen] = useState(false)
-  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0 })
+  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, capital_allocation: 'SHARED' })
   const [backtestConfig, setBacktestConfig] = useState(loadBacktestSettings)
   const [yahooTicker, setYahooTicker] = useState('')
   const [selectedYahooInstruments, setSelectedYahooInstruments] = useState([])
@@ -338,10 +437,12 @@ function App() {
   useEffect(() => {
     const query = yahooTicker.trim()
     if (activePage !== 'data-download-yahoo-finance' || query.length < 2) {
-      setYahooSymbolResults([])
-      setIsSearchingYahoo(false)
-      setYahooSearchError('')
-      return undefined
+      const resetTimer = window.setTimeout(() => {
+        setYahooSymbolResults([])
+        setIsSearchingYahoo(false)
+        setYahooSearchError('')
+      }, 0)
+      return () => window.clearTimeout(resetTimer)
     }
     const controller = new AbortController()
     const timer = window.setTimeout(async () => {
@@ -361,11 +462,14 @@ function App() {
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [activePage, yahooTicker])
 
-  function applyStrategy(strategy) {
+  function applyStrategy(strategy, bucketId = activeBucketId) {
     strategyInstanceCount.current += 1
     const instanceId = `${strategy.id}-${strategyInstanceCount.current}`
+    const feedIds = dataFiles.filter((file) => file.bucketId === bucketId).map((file) => file.instanceId)
     setBacktestStrategies((items) => [...items, {
       instanceId,
+      bucketId,
+      feedIds,
       ...strategy,
       baseConfigDraft: Object.fromEntries(strategy.baseConfig.map((field) => [field.key, field.default])),
       strategyConfigDraft: Object.fromEntries(strategy.parameters.map((field) => [field.key, field.default])),
@@ -374,41 +478,81 @@ function App() {
     setBacktestError('')
   }
 
-  function handleStrategyDrop(event) {
+  function handleStrategyDrop(bucketId, event) {
     event.preventDefault()
     const strategyId = event.dataTransfer.getData('application/x-quantogral-strategy')
     const strategy = strategyCatalog.find((item) => item.id === strategyId)
-    if (strategy) applyStrategy(strategy)
-    else setBacktestError('That strategy is not registered with the C++ backtest engine yet.')
+    if (strategy) applyStrategy(strategy, bucketId)
+    else setBacktestError('That strategy is not available in the discovered C++ strategy catalog.')
   }
 
-  function addDataFile(path, name = path.split('/').pop()) {
+  function addDataFile(path, name = path.split('/').pop(), bucketId = activeBucketId) {
     if (!path) return
+    const duplicate = dataFiles.find((item) => item.path === path && item.bucketId === bucketId)
+    if (duplicate) return
     dataInstanceCount.current += 1
-    setDataFiles((items) => items.some((item) => item.path === path)
-      ? items
-      : [...items, { instanceId: `data-${dataInstanceCount.current}`, path, name }])
+    const instanceId = `feed-${dataInstanceCount.current}`
+    setDataFiles((items) => [...items, { instanceId, bucketId, path, name, tsUnit: 'MILLISECONDS', dateFormat: 'DDMMYYYY' }])
+    setBacktestStrategies((items) => items.map((item) => item.bucketId === bucketId
+      ? { ...item, feedIds: item.feedIds.includes(instanceId) ? item.feedIds : [...item.feedIds, instanceId] }
+      : item))
     setBacktestResult(null)
     setBacktestError('')
   }
 
-  function handleDataDrop(event) {
+  function handleDataDrop(bucketId, event) {
     event.preventDefault()
     const path = event.dataTransfer.getData('application/x-quantogral-data-file')
-    if (path) addDataFile(path)
+    if (path) addDataFile(path, path.replaceAll('\\', '/').split('/').pop(), bucketId)
   }
 
-  function addManualDataFile() {
+  function addManualDataFile(bucketId = activeBucketId) {
     const path = manualDataPath.trim()
     if (!path) return
-    addDataFile(path, path.replaceAll('\\', '/').split('/').pop())
+    addDataFile(path, path.replaceAll('\\', '/').split('/').pop(), bucketId)
     setManualDataPath('')
+  }
+
+  function removeDataFile(instanceId) {
+    setDataFiles((items) => items.filter((item) => item.instanceId !== instanceId))
+    setBacktestStrategies((items) => items.map((item) => ({ ...item, feedIds: item.feedIds.filter((feedId) => feedId !== instanceId) })))
+    setBacktestResult(null)
+  }
+
+  function updateFeed(instanceId, key, value) {
+    setDataFiles((items) => items.map((item) => item.instanceId === instanceId ? { ...item, [key]: value } : item))
+    setBacktestResult(null)
+  }
+
+  function toggleStrategyFeed(instanceId, feedId) {
+    setBacktestStrategies((items) => items.map((item) => item.instanceId === instanceId
+      ? { ...item, feedIds: item.feedIds.includes(feedId) ? item.feedIds.filter((id) => id !== feedId) : [...item.feedIds, feedId] }
+      : item))
+    setBacktestResult(null)
+  }
+
+  function addBacktestBucket() {
+    bucketInstanceCount.current += 1
+    const bucket = { id: `bucket-${bucketInstanceCount.current}`, name: `Bucket ${bucketInstanceCount.current}` }
+    setBacktestBuckets((items) => [...items, bucket])
+    setActiveBucketId(bucket.id)
+  }
+
+  function removeBacktestBucket(bucketId) {
+    if (backtestBuckets.length <= 1) return
+    const remaining = backtestBuckets.filter((bucket) => bucket.id !== bucketId)
+    setBacktestBuckets(remaining)
+    setBacktestStrategies((items) => items.filter((item) => item.bucketId !== bucketId))
+    setDataFiles((items) => items.filter((item) => item.bucketId !== bucketId))
+    if (activeBucketId === bucketId) setActiveBucketId(remaining[0].id)
+    setBacktestResult(null)
   }
 
   function updateBacktestStrategy(instanceId, section, key, value) {
     setBacktestStrategies((items) => items.map((item) => item.instanceId === instanceId
       ? { ...item, [section]: { ...item[section], [key]: value } }
       : item))
+    setBacktestResult(null)
   }
 
   useEffect(() => {
@@ -559,6 +703,25 @@ function App() {
     return result
   }, [])
 
+  const refreshStrategyCatalog = useCallback(async () => {
+    const [catalogResponse, compilationResponse] = await Promise.all([fetch('/api/strategies'), fetch('/api/compilation')])
+    const [catalog, state] = await Promise.all([readApiJson(catalogResponse, 'strategy catalog'), readApiJson(compilationResponse, 'compilation status')])
+    if (!catalogResponse.ok || !compilationResponse.ok) throw new Error('Could not refresh the C++ strategy catalog.')
+    setStrategyCatalog(catalog.strategies || [])
+    setCompilation(state)
+    setCompileSelection((current) => Object.fromEntries((catalog.strategies || []).map((strategy) => [strategy.id, current[strategy.id] ?? true])))
+  }, [])
+
+  const refreshCatalogIfStrategyHeader = useCallback(async (editor) => {
+    if (editor.scope === 'builder' && editor.path.includes('strategies/') && editor.path.toLowerCase().endsWith('.hpp')) {
+      try {
+        await refreshStrategyCatalog()
+      } catch (error) {
+        setCompileError(`File saved, but strategy discovery failed: ${error.message}`)
+      }
+    }
+  }, [refreshStrategyCatalog])
+
   const saveCurrentWorkspaceFile = useCallback(async () => {
     if (!fileEditor || fileEditor.loading) return false
     const contentToSave = fileEditor.content
@@ -567,6 +730,7 @@ function App() {
     try {
       await persistWorkspaceFile(fileEditor)
       setFileEditor((current) => current ? { ...current, savedContent: contentToSave } : current)
+      await refreshCatalogIfStrategyHeader(fileEditor)
       return true
     } catch (error) {
       setEditorError(error.message)
@@ -574,7 +738,7 @@ function App() {
     } finally {
       setEditorSaving(false)
     }
-  }, [fileEditor, persistWorkspaceFile])
+  }, [fileEditor, persistWorkspaceFile, refreshCatalogIfStrategyHeader])
 
   useEffect(() => {
     if (!fileEditor) return undefined
@@ -629,6 +793,7 @@ function App() {
       setUnsavedPromptError('')
       try {
         await persistWorkspaceFile(fileEditor)
+        await refreshCatalogIfStrategyHeader(fileEditor)
       } catch (error) {
         setUnsavedPromptError(`Could not save changes: ${error.message}`)
         setEditorSaving(false)
@@ -659,6 +824,7 @@ function App() {
       const tree = await treeResponse.json()
       setBuilderTree(tree.children)
       setDataTree(tree.dataChildren || [])
+      if (itemDialog.scope === 'builder') await refreshStrategyCatalog()
       if (itemDialog.scope === 'builder') setBuilderExpanded(true)
       else setExpandedNodes((nodes) => ({ ...nodes, data: true }))
       if (!isRename && result.type === 'directory') {
@@ -769,7 +935,7 @@ function App() {
     }
     setIsCompiling(true)
     setCompileError('')
-    setCompileMessage(mode === 'all' ? 'Compiling all registered strategies…' : 'Compiling selected strategies…')
+    setCompileMessage(mode === 'all' ? 'Compiling all discovered strategies…' : 'Compiling selected strategies…')
     try {
       const strategyIds = Object.entries(compileSelection).filter(([, selected]) => selected).map(([id]) => id)
       const response = await fetch('/api/compilation', {
@@ -843,8 +1009,19 @@ function App() {
 
   async function runSimpleBacktest(event) {
     event.preventDefault()
-    if (backtestStrategies.length !== 1 || dataFiles.length !== 1) {
-      setBacktestError('The current backtest runner requires exactly one strategy and one data file per run.')
+    const populatedBuckets = backtestBuckets.filter((bucket) =>
+      backtestStrategies.some((strategy) => strategy.bucketId === bucket.id) || dataFiles.some((feed) => feed.bucketId === bucket.id))
+    if (!populatedBuckets.length) {
+      setBacktestError('Add a strategy and at least one data feed to a bucket before running.')
+      return
+    }
+    const incompleteBucket = populatedBuckets.find((bucket) => {
+      const bucketStrategies = backtestStrategies.filter((strategy) => strategy.bucketId === bucket.id)
+      const bucketFeeds = dataFiles.filter((feed) => feed.bucketId === bucket.id)
+      return !bucketStrategies.length || !bucketFeeds.length || bucketStrategies.some((strategy) => !strategy.feedIds.length)
+    })
+    if (incompleteBucket) {
+      setBacktestError(`${incompleteBucket.name} needs at least one strategy, one feed, and a feed connection for each strategy.`)
       return
     }
     setBacktestError('')
@@ -855,10 +1032,22 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          strategyId: backtestStrategies[0].id,
-          dataPath: dataFiles[0].path,
-          baseConfig: backtestStrategies[0].baseConfigDraft,
-          parameters: backtestStrategies[0].strategyConfigDraft,
+          buckets: populatedBuckets.map((bucket) => ({
+            id: bucket.id,
+            feeds: dataFiles.filter((feed) => feed.bucketId === bucket.id).map((feed) => ({
+              id: feed.instanceId,
+              path: feed.path,
+              tsUnit: feed.tsUnit,
+              dateFormat: feed.dateFormat,
+            })),
+            strategies: backtestStrategies.filter((strategy) => strategy.bucketId === bucket.id).map((strategy) => ({
+              instanceId: strategy.instanceId,
+              strategyId: strategy.id,
+              feedIds: strategy.feedIds,
+              baseConfig: strategy.baseConfigDraft,
+              parameters: strategy.strategyConfigDraft,
+            })),
+          })),
           backtestConfig,
         }),
       })
@@ -1113,67 +1302,41 @@ function App() {
               <p className="page-description">Add strategies and market-data files from the project explorer, then configure each strategy.</p>
 
             <form className="simple-backtest-form" onSubmit={runSimpleBacktest}>
-              <section className="config-section assembly-section">
-                <div className="config-section-heading"><h2>Strategies</h2><span>{backtestStrategies.length} added</span></div>
-                <div
-                  className={`assembly-drop-target strategy-assembly-target ${isDragHovering ? 'is-drag-hovering' : ''}`}
-                  onDragEnter={(event) => { event.preventDefault(); dragEnterCount.current += 1; setIsDragHovering(true) }}
-                  onDragLeave={() => { dragEnterCount.current = Math.max(0, dragEnterCount.current - 1); if (dragEnterCount.current === 0) setIsDragHovering(false) }}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => { dragEnterCount.current = 0; setIsDragHovering(false); handleStrategyDrop(event) }}
-                >
-                  <span>Drop strategies here from Builder</span>
-                  {strategyCatalog.map((strategy) => <button className="assembly-add-button" key={strategy.id} onClick={() => applyStrategy(strategy)} type="button">+ {strategy.name}</button>)}
-                </div>
-
-                {backtestStrategies.length > 0 && <div className="assembly-list">
-                  {backtestStrategies.map((strategy) => {
-                    const expanded = Boolean(expandedBacktestStrategies[strategy.instanceId])
-                    return (
-                      <article className="strategy-config-card" key={strategy.instanceId}>
-                        <div className="strategy-config-row">
-                          <button aria-expanded={expanded} aria-controls={`strategy-config-${strategy.instanceId}`} className="strategy-config-toggle" onClick={() => setExpandedBacktestStrategies((items) => ({ ...items, [strategy.instanceId]: !items[strategy.instanceId] }))} type="button">
-                            <span className="tree-chevron">{expanded ? '⌄' : '›'}</span><strong>{strategy.name}</strong><span className="strategy-config-id" title="Strategy ID">{strategy.id}</span>
-                          </button>
-                          <button aria-label={`Remove ${strategy.name}`} className="remove-item-button" onClick={() => { setBacktestStrategies((items) => items.filter((item) => item.instanceId !== strategy.instanceId)); setBacktestResult(null) }} type="button">×</button>
-                        </div>
-                        {expanded && <div className="strategy-config-details" id={`strategy-config-${strategy.instanceId}`}>
-                          <section>
-                            <div className="config-section-heading"><h3>Base settings</h3></div>
-                            <div className="config-grid config-toggle-grid">
-                              {strategy.baseConfig.map((field) => <ConfigField key={field.key} field={field} value={strategy.baseConfigDraft[field.key]} onChange={(key, value) => updateBacktestStrategy(strategy.instanceId, 'baseConfigDraft', key, value)} />)}
-                            </div>
-                          </section>
-                          <section>
-                            <div className="config-section-heading"><h3>{strategy.name} settings</h3></div>
-                            <div className="config-grid">
-                              {strategy.parameters.map((field) => <ConfigField key={field.key} field={field} value={strategy.strategyConfigDraft[field.key]} onChange={(key, value) => updateBacktestStrategy(strategy.instanceId, 'strategyConfigDraft', key, value)} />)}
-                            </div>
-                          </section>
-                        </div>}
-                      </article>
-                    )
-                  })}
-                </div>}
-              </section>
-
-              <section className="config-section assembly-section">
-                <div className="config-section-heading"><h2>Data</h2><span>{dataFiles.length} added · CSV or Parquet</span></div>
-                <div
-                  className={`assembly-drop-target data-assembly-target ${isDataDragHovering ? 'is-drag-hovering' : ''}`}
-                  onDragEnter={(event) => { event.preventDefault(); dataDragEnterCount.current += 1; setIsDataDragHovering(true) }}
-                  onDragLeave={() => { dataDragEnterCount.current = Math.max(0, dataDragEnterCount.current - 1); if (dataDragEnterCount.current === 0) setIsDataDragHovering(false) }}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => { dataDragEnterCount.current = 0; setIsDataDragHovering(false); handleDataDrop(event) }}
-                >Drop data files here from the project explorer</div>
-                {dataFiles.length > 0 && <div className="assembly-list data-file-list">
-                  {dataFiles.map((file) => <div className="data-file-row" key={file.instanceId}><ScriptIcon /><span className="data-file-name" title={file.path}>{file.name}</span><span className="data-file-path">{file.path}</span><button aria-label={`Remove ${file.name}`} className="remove-item-button" onClick={() => { setDataFiles((items) => items.filter((item) => item.instanceId !== file.instanceId)); setBacktestResult(null) }} type="button">×</button></div>)}
-                </div>}
-                <div className="manual-data-entry">
-                  <input aria-label="Market-data file path" onChange={(event) => setManualDataPath(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addManualDataFile() } }} placeholder="Or enter a CSV / Parquet path" spellCheck="false" type="text" value={manualDataPath} />
-                  <button className="secondary-button" disabled={!manualDataPath.trim()} onClick={addManualDataFile} type="button">Add file</button>
-                </div>
-              </section>
+              <div className="backtest-buckets-toolbar">
+                <div><h2>Buckets</h2><p>Each bucket is an independent account. Strategies in a bucket share its capital and process its feeds in timestamp order.</p></div>
+                <button className="secondary-button" onClick={addBacktestBucket} type="button">+ Add bucket</button>
+              </div>
+              {backtestBuckets.map((bucket) => <div className="backtest-bucket-wrap" key={bucket.id}>
+                {backtestBuckets.length > 1 && <button aria-label={`Remove ${bucket.name}`} className="bucket-remove-button" onClick={() => removeBacktestBucket(bucket.id)} type="button">Remove bucket</button>}
+                <BacktestBucketPanel
+                  bucket={bucket}
+                  strategies={backtestStrategies.filter((strategy) => strategy.bucketId === bucket.id)}
+                  dataFiles={dataFiles.filter((feed) => feed.bucketId === bucket.id)}
+                  strategyCatalog={strategyCatalog}
+                  expandedStrategies={expandedBacktestStrategies}
+                  selectedForSidebar={activeBucketId === bucket.id}
+                  strategyDropHover={strategyDropHoverBucket === bucket.id}
+                  dataDropHover={dataDropHoverBucket === bucket.id}
+                  manualDataPath={manualDataPath}
+                  onSelectBucket={setActiveBucketId}
+                  onAddStrategy={applyStrategy}
+                  onStrategyDragEnter={(bucketId, event) => { event.preventDefault(); setStrategyDropHoverBucket(bucketId) }}
+                  onStrategyDragLeave={(bucketId, event) => { if (!event.currentTarget.contains(event.relatedTarget)) setStrategyDropHoverBucket((current) => current === bucketId ? null : current) }}
+                  onStrategyDrop={(bucketId, event) => { setStrategyDropHoverBucket(null); handleStrategyDrop(bucketId, event) }}
+                  onDataDragEnter={(bucketId, event) => { event.preventDefault(); setDataDropHoverBucket(bucketId) }}
+                  onDataDragLeave={(bucketId, event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDataDropHoverBucket((current) => current === bucketId ? null : current) }}
+                  onDataDrop={(bucketId, event) => { setDataDropHoverBucket(null); handleDataDrop(bucketId, event) }}
+                  onToggleStrategy={(instanceId) => setExpandedBacktestStrategies((items) => ({ ...items, [instanceId]: !items[instanceId] }))}
+                  onRemoveStrategy={(instanceId) => { setBacktestStrategies((items) => items.filter((item) => item.instanceId !== instanceId)); setBacktestResult(null) }}
+                  onToggleFeed={toggleStrategyFeed}
+                  onUpdateStrategy={updateBacktestStrategy}
+                  onRemoveFeed={removeDataFile}
+                  onUpdateFeed={updateFeed}
+                  onManualPathChange={setManualDataPath}
+                  onManualPathKeyDown={(bucketId, event) => { if (event.key === 'Enter') { event.preventDefault(); addManualDataFile(bucketId) } }}
+                  onAddManualPath={addManualDataFile}
+                />
+              </div>)}
 
               {!compilation.current && (
                 <div className="engine-notice">
@@ -1181,25 +1344,35 @@ function App() {
                   <button className="secondary-button" onClick={() => { openBuilderDialog(); openCompilationView() }} type="button">Manage compilation</button>
                 </div>
               )}
-              {(backtestStrategies.length > 1 || dataFiles.length > 1) && <div className="engine-notice">Multiple strategies and files can be assembled here; execution currently requires one of each.</div>}
               {backtestError && <p className="form-error">{backtestError}</p>}
-              <button className="primary-button run-backtest-button" disabled={!compilation.current || backtestStrategies.length !== 1 || dataFiles.length !== 1 || isRunningBacktest} type="submit">
-                {isRunningBacktest ? 'Running C++ backtest…' : 'Run backtest'}
+              <button className="primary-button run-backtest-button" disabled={!compilation.current || backtestStrategies.length === 0 || dataFiles.length === 0 || backtestStrategies.some((strategy) => strategy.feedIds.length === 0) || isRunningBacktest} type="submit">
+                {isRunningBacktest ? 'Running bucketed C++ backtest…' : 'Run backtest'}
               </button>
             </form>
 
             {backtestResult && (
               <section className="backtest-results">
-                <div className="config-section-heading"><h2>Run results</h2><span>{backtestResult.inputRows.toLocaleString()} OHLCV rows processed</span></div>
+                <div className="config-section-heading"><h2>Run results</h2><span>{backtestResult.buckets.length} buckets · {backtestResult.inputRows.toLocaleString()} feed rows processed</span></div>
                 <div className="result-metrics">
                   <div><span>Final equity</span><strong>{backtestResult.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></div>
                   <div><span>Return</span><strong>{backtestResult.metrics.returnPct.toFixed(2)}%</strong></div>
                   <div><span>Max drawdown</span><strong>{backtestResult.metrics.maxDrawdownPct.toFixed(2)}%</strong></div>
                   <div><span>Orders</span><strong>{backtestResult.metrics.orders}</strong></div>
                 </div>
+                <div className="bucket-result-list">
+                  {backtestResult.buckets.map((bucket) => <article className="bucket-result-card" key={bucket.id}>
+                    <div className="config-section-heading"><h3>{backtestBuckets.find((item) => item.id === bucket.id)?.name || bucket.id}</h3><span>{bucket.strategies.length} strategies · {bucket.feeds.length} feeds</span></div>
+                    <div className="bucket-result-details">
+                      <span>Equity <strong>{bucket.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></span>
+                      <span>Return <strong>{bucket.metrics.returnPct.toFixed(2)}%</strong></span>
+                      <span>Drawdown <strong>{bucket.metrics.maxDrawdownPct.toFixed(2)}%</strong></span>
+                    </div>
+                    <div className="bucket-result-strategies">{bucket.strategies.map((strategy) => <span key={strategy.instanceId}>{strategy.name} <code>{strategy.instanceId}</code> · {strategy.orders.length} orders</span>)}</div>
+                  </article>)}
+                </div>
                 <div className="orders-table-wrap">
-                  <table className="orders-table"><thead><tr><th>Time (epoch ms)</th><th>Side</th><th>Quantity</th><th>Price</th><th>Status</th></tr></thead>
-                    <tbody>{backtestResult.orders.length ? backtestResult.orders.map((order) => <tr key={`${order.id}-${order.timestamp}`}><td>{order.timestamp}</td><td>{order.signal}</td><td>{order.quantity}</td><td>{order.price.toFixed(4)}</td><td>{order.status}</td></tr>) : <tr><td colSpan="5">No orders were generated for this data and configuration.</td></tr>}</tbody>
+                  <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy instance</th><th>Feed</th><th>Time (epoch ms)</th><th>Side</th><th>Quantity</th><th>Price</th><th>Status</th></tr></thead>
+                    <tbody>{backtestResult.orders.length ? backtestResult.orders.map((order) => <tr key={`${order.bucketId}-${order.instanceId}-${order.id}-${order.timestamp}`}><td>{backtestBuckets.find((item) => item.id === order.bucketId)?.name || order.bucketId}</td><td>{order.strategyName} · {order.instanceId}</td><td>{order.feedId || "—"}</td><td>{order.timestamp}</td><td>{order.signal}</td><td>{order.quantity}</td><td>{order.price.toFixed(4)}</td><td>{order.status}</td></tr>) : <tr><td colSpan="8">No orders were generated for this data and configuration.</td></tr>}</tbody>
                   </table>
                 </div>
               </section>
@@ -1311,14 +1484,15 @@ function App() {
           <section aria-labelledby="backtest-settings-title" aria-modal="true" className="path-dialog backtest-settings-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
             <div className="eyebrow">SIMPLE BACKTESTING</div>
             <h2 id="backtest-settings-title">Run settings</h2>
-            <p>These defaults are saved in this browser on this computer.</p>
+            <p>These defaults are saved in this browser. Starting capital applies independently to each bucket.</p>
             <div className="backtest-settings-fields">
-              <label className="config-field"><span>Starting capital</span><input autoFocus min="0.01" onChange={(event) => setBacktestSettingsDraft((settings) => ({ ...settings, initial_capital: event.target.value }))} step="1000" type="number" value={backtestSettingsDraft.initial_capital} /></label>
+              <label className="config-field"><span>Starting capital per bucket</span><input autoFocus min="0.01" onChange={(event) => setBacktestSettingsDraft((settings) => ({ ...settings, initial_capital: event.target.value }))} step="1000" type="number" value={backtestSettingsDraft.initial_capital} /></label>
               <label className="config-field"><span>Transaction cost (bps)</span><input min="0" onChange={(event) => setBacktestSettingsDraft((settings) => ({ ...settings, cost_bps: event.target.value }))} step="0.1" type="number" value={backtestSettingsDraft.cost_bps} /></label>
+              <label className="config-field"><span>Strategy capital</span><select onChange={(event) => setBacktestSettingsDraft((settings) => ({ ...settings, capital_allocation: event.target.value }))} value={backtestSettingsDraft.capital_allocation}><option value="SHARED">Shared within each bucket</option><option value="EQUAL_PER_STRATEGY">Split evenly per strategy</option></select></label>
             </div>
             <div className="dialog-actions">
               <button className="secondary-button" onClick={() => setBacktestSettingsOpen(false)} type="button">Cancel</button>
-              <button className="primary-button" disabled={Number(backtestSettingsDraft.initial_capital) <= 0 || Number(backtestSettingsDraft.cost_bps) < 0} onClick={() => { setBacktestConfig({ initial_capital: Number(backtestSettingsDraft.initial_capital), cost_bps: Number(backtestSettingsDraft.cost_bps) }); setBacktestSettingsOpen(false) }} type="button">Save settings</button>
+              <button className="primary-button" disabled={Number(backtestSettingsDraft.initial_capital) <= 0 || Number(backtestSettingsDraft.cost_bps) < 0} onClick={() => { setBacktestConfig({ initial_capital: Number(backtestSettingsDraft.initial_capital), cost_bps: Number(backtestSettingsDraft.cost_bps), capital_allocation: backtestSettingsDraft.capital_allocation }); setBacktestSettingsOpen(false) }} type="button">Save settings</button>
             </div>
           </section>
         </div>
@@ -1358,7 +1532,7 @@ function App() {
               </>
             ) : (
               <>
-                <p>Compile the registered C++ strategies. Build output stays in the local `.quantogral/build/` folder; source headers are not modified.</p>
+                <p>Compile discovered C++ strategies. Build output stays in the local `.quantogral/build/` folder; source headers are not modified.</p>
                 <div className={`compile-status ${compilation.current ? 'is-ready' : ''}`}>
                   <span className="status-dot" />
                   <span>{compilation.current ? 'Engine compiled and up to date' : compilation.compiled ? 'Engine build is out of date' : 'Engine has not been compiled'}</span>
@@ -1371,7 +1545,7 @@ function App() {
                     </label>
                   ))}
                 </div>
-                <p className="input-help">Only strategies registered with the C++ engine appear here. Custom headers need to follow the strategy registration contract before they can be compiled.</p>
+                <p className="input-help">Strategies are detected from their C++ class and Config fields. Save a supported strategy header to add it here.</p>
                 {compileMessage && <p className="compile-message">{compileMessage}</p>}
                 {compileError && <p className="form-error compile-error">{compileError}</p>}
                 <div className="dialog-actions compile-actions">

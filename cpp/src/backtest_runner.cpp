@@ -5,13 +5,14 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "backtest/backtest.hpp"
-#include "builder/strategies/built-in/ma_cross.hpp"
+#include "quantogral_strategy_registry.generated.hpp"
 #include "core/market_events.hpp"
 #include "utils/time.hpp"
 
@@ -73,23 +74,43 @@ std::string normalized(std::string value) {
     return value;
 }
 
-bool is_header_row(const std::vector<std::string>& cells) {
-    if (cells.size() < 6) return false;
-    const auto timestamp = normalized(cells[0]);
-    return (timestamp == "timestamp" || timestamp == "time" || timestamp == "date" || timestamp == "datetime" || timestamp == "ts" || timestamp == "epoch") &&
-        normalized(cells[1]) == "open" && normalized(cells[2]) == "high" && normalized(cells[3]) == "low" &&
-        normalized(cells[4]) == "close" && normalized(cells[5]) == "volume";
+struct OhlcvColumns {
+    std::size_t timestamp = 0;
+    std::size_t open = 1;
+    std::size_t high = 2;
+    std::size_t low = 3;
+    std::size_t close = 4;
+    std::size_t volume = 5;
+};
+
+std::optional<OhlcvColumns> detect_ohlcv_header(const std::vector<std::string>& cells) {
+    OhlcvColumns columns;
+    bool has_timestamp = false, has_open = false, has_high = false;
+    bool has_low = false, has_close = false, has_volume = false;
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        const auto name = normalized(cells[i]);
+        if (name == "timestamp" || name == "time" || name == "date" || name == "datetime" || name == "ts" || name == "epoch") {
+            columns.timestamp = i; has_timestamp = true;
+        } else if (name == "open" || name == "o") { columns.open = i; has_open = true; }
+        else if (name == "high" || name == "h") { columns.high = i; has_high = true; }
+        else if (name == "low" || name == "l") { columns.low = i; has_low = true; }
+        else if (name == "close" || name == "c") { columns.close = i; has_close = true; }
+        else if (name == "volume" || name == "vol" || name == "v") { columns.volume = i; has_volume = true; }
+    }
+    if (has_timestamp && has_open && has_high && has_low && has_close && has_volume) return columns;
+    return std::nullopt;
 }
 
-OHLCVEvent parse_ohlcv_row(const std::vector<std::string>& cells, TS_UNIT unit, DATE_FORMAT format) {
-    if (cells.size() < 6) throw std::runtime_error("Each market-data row needs timestamp, open, high, low, close, and volume columns in that order.");
+OHLCVEvent parse_ohlcv_row(const std::vector<std::string>& cells, const OhlcvColumns& columns, TS_UNIT unit, DATE_FORMAT format) {
+    const auto largest_column = std::max({columns.timestamp, columns.open, columns.high, columns.low, columns.close, columns.volume});
+    if (cells.size() <= largest_column) throw std::runtime_error("Each market-data row must contain timestamp, open, high, low, close, and volume values.");
     OHLCVEvent bar;
-    bar.ts = parse_timestamp(cells[0], unit, format);
-    bar.open = std::stod(cells[1]);
-    bar.high = std::stod(cells[2]);
-    bar.low = std::stod(cells[3]);
-    bar.close = std::stod(cells[4]);
-    bar.volume = std::stod(cells[5]);
+    bar.ts = parse_timestamp(cells[columns.timestamp], unit, format);
+    bar.open = std::stod(cells[columns.open]);
+    bar.high = std::stod(cells[columns.high]);
+    bar.low = std::stod(cells[columns.low]);
+    bar.close = std::stod(cells[columns.close]);
+    bar.volume = std::stod(cells[columns.volume]);
     if (!std::isfinite(bar.open) || !std::isfinite(bar.high) || !std::isfinite(bar.low) ||
         !std::isfinite(bar.close) || !std::isfinite(bar.volume)) {
         throw std::runtime_error("Market data contains a non-finite OHLCV value.");
@@ -109,54 +130,19 @@ std::vector<OHLCVEvent> load_ohlcv_csv(const std::string& path, TS_UNIT unit, DA
     }
     if (rows.empty()) throw std::runtime_error("The selected market-data file is empty.");
 
-    std::size_t first_row = 0;
-    if (is_header_row(split_csv_row(rows.front()))) first_row = 1;
+    const auto header = detect_ohlcv_header(split_csv_row(rows.front()));
+    const std::size_t first_row = header ? 1 : 0;
+    const OhlcvColumns columns = header.value_or(OhlcvColumns{});
     std::vector<OHLCVEvent> bars;
     for (std::size_t i = first_row; i < rows.size(); ++i) {
         try {
-            bars.push_back(parse_ohlcv_row(split_csv_row(rows[i]), unit, format));
+            bars.push_back(parse_ohlcv_row(split_csv_row(rows[i]), columns, unit, format));
         } catch (const std::exception& error) {
             throw std::runtime_error("Could not read market-data row " + std::to_string(i + 1) + ": " + error.what());
         }
     }
     if (bars.empty()) throw std::runtime_error("The selected market-data file contains no OHLCV rows.");
     return bars;
-}
-
-bool parse_bool(const char* value) {
-    const std::string text(value);
-    if (text == "true" || text == "1") return true;
-    if (text == "false" || text == "0") return false;
-    throw std::invalid_argument("Expected true or false.");
-}
-
-TS_UNIT parse_ts_unit(const std::string& value) {
-    if (value == "SECONDS") return TS_UNIT::SECONDS;
-    if (value == "MILLISECONDS") return TS_UNIT::MILLISECONDS;
-    if (value == "MICROSECONDS") return TS_UNIT::MICROSECONDS;
-    if (value == "NANOSECONDS") return TS_UNIT::NANOSECONDS;
-    throw std::invalid_argument("Unsupported timestamp unit.");
-}
-
-DATE_FORMAT parse_date_format(const std::string& value) {
-    if (value == "DDMMYYYY") return DATE_FORMAT::DDMMYYYY;
-    if (value == "MMDDYYYY") return DATE_FORMAT::MMDDYYYY;
-    throw std::invalid_argument("Unsupported date format.");
-}
-
-PRICE_FIELD parse_price_field(const std::string& value) {
-    if (value == "OPEN") return PRICE_FIELD::OPEN;
-    if (value == "HIGH") return PRICE_FIELD::HIGH;
-    if (value == "LOW") return PRICE_FIELD::LOW;
-    if (value == "CLOSE") return PRICE_FIELD::CLOSE;
-    if (value == "VOLUME") return PRICE_FIELD::VOLUME;
-    throw std::invalid_argument("Unsupported price field.");
-}
-
-SIZING_MODE parse_sizing_mode(const std::string& value) {
-    if (value == "FIXED") return SIZING_MODE::FIXED;
-    if (value == "FIXED_FRACTIONAL_PRICE") return SIZING_MODE::FIXED_FRACTIONAL_PRICE;
-    throw std::invalid_argument("Unsupported position-sizing mode for MA Cross.");
 }
 
 const char* signal_name(SIGNAL signal) {
@@ -183,27 +169,70 @@ const char* status_name(ORDER_STATUS status) {
     return "UNKNOWN";
 }
 
-void print_catalog() {
-    std::cout << R"JSON({"strategies":[{"id":"ma_cross","name":"Moving Average Cross","file":"ma_cross.hpp","input":"OHLCV","baseConfig":[{"key":"active","label":"Strategy active","type":"boolean","default":true},{"key":"long_active","label":"Allow long positions","type":"boolean","default":true},{"key":"short_active","label":"Allow short positions","type":"boolean","default":true},{"key":"stacking","label":"Allow position stacking","type":"boolean","default":true},{"key":"ts_unit","label":"Numeric timestamp unit","type":"select","default":"MILLISECONDS","options":["SECONDS","MILLISECONDS","MICROSECONDS","NANOSECONDS"]},{"key":"date_format","label":"Ambiguous date format","type":"select","default":"DDMMYYYY","options":["DDMMYYYY","MMDDYYYY"]}],"parameters":[{"key":"fast_len","label":"Fast period","type":"number","default":10,"min":1,"step":1},{"key":"slow_len","label":"Slow period","type":"number","default":30,"min":2,"step":1},{"key":"fast_price_field","label":"Fast price field","type":"select","default":"CLOSE","options":["OPEN","HIGH","LOW","CLOSE","VOLUME"]},{"key":"slow_price_field","label":"Slow price field","type":"select","default":"CLOSE","options":["OPEN","HIGH","LOW","CLOSE","VOLUME"]},{"key":"slnot","label":"Stop-loss amount (0 disables)","type":"number","default":-1,"step":0.01},{"key":"slpct","label":"Stop-loss percent (0 disables)","type":"number","default":-1,"step":0.01},{"key":"pos_sizing_mode","label":"Position sizing","type":"select","default":"FIXED","options":["FIXED","FIXED_FRACTIONAL_PRICE"]},{"key":"qty","label":"Fixed quantity","type":"number","default":1,"min":0.000001,"step":0.1},{"key":"equity_pct","label":"Equity fraction","type":"number","default":0.05,"min":0.000001,"max":1,"step":0.01}]}]})JSON" << '\n';
+TS_UNIT parse_ts_unit(const std::string& value) {
+    if (value == "SECONDS") return TS_UNIT::SECONDS;
+    if (value == "MILLISECONDS") return TS_UNIT::MILLISECONDS;
+    if (value == "MICROSECONDS") return TS_UNIT::MICROSECONDS;
+    if (value == "NANOSECONDS") return TS_UNIT::NANOSECONDS;
+    throw std::invalid_argument("Unsupported timestamp unit for data feed.");
 }
 
-void print_results(const BacktestResults& results, std::size_t input_rows) {
-    std::cout << std::setprecision(15) << "{\"inputRows\":" << input_rows << ",\"equityCurve\":[";
-    for (std::size_t i = 0; i < results.equity_curve.size(); ++i) {
+DATE_FORMAT parse_date_format(const std::string& value) {
+    if (value == "DDMMYYYY") return DATE_FORMAT::DDMMYYYY;
+    if (value == "MMDDYYYY") return DATE_FORMAT::MMDDYYYY;
+    throw std::invalid_argument("Unsupported date format for data feed.");
+}
+
+void print_equity_curve(const std::vector<double>& curve) {
+    std::cout << '[';
+    for (std::size_t i = 0; i < curve.size(); ++i) {
         if (i) std::cout << ',';
-        std::cout << results.equity_curve[i];
+        std::cout << curve[i];
     }
-    std::cout << "],\"orders\":[";
-    for (std::size_t i = 0; i < results.hlog.size(); ++i) {
-        const auto& order = results.hlog[i];
+    std::cout << ']';
+}
+
+void print_orders(const std::vector<OrderEvent>& orders) {
+    std::cout << '[';
+    for (std::size_t i = 0; i < orders.size(); ++i) {
+        const auto& order = orders[i];
         if (i) std::cout << ',';
         std::cout << "{\"id\":" << order.id
                   << ",\"timestamp\":" << order.ts
+                  << ",\"feedId\":\"" << json_escape(order.symbol) << "\""
                   << ",\"signal\":\"" << signal_name(order.signal) << "\""
                   << ",\"quantity\":" << order.qty
                   << ",\"price\":" << order.price
                   << ",\"status\":\"" << status_name(order.status) << "\""
                   << ",\"reason\":\"" << json_escape(order.reason) << "\"}";
+    }
+    std::cout << ']';
+}
+
+void print_results(const BacktestRunResults& results, std::size_t input_rows) {
+    std::cout << std::setprecision(15) << "{\"inputRows\":" << input_rows << ",\"buckets\":[";
+    for (std::size_t bucket_index = 0; bucket_index < results.buckets.size(); ++bucket_index) {
+        const auto& bucket = results.buckets[bucket_index];
+        if (bucket_index) std::cout << ',';
+        std::cout << "{\"id\":\"" << json_escape(bucket.bucket_id) << "\",\"equityCurve\":";
+        print_equity_curve(bucket.equity_curve);
+        std::cout << ",\"equityTimestamps\":[";
+        for (std::size_t i = 0; i < bucket.equity_timestamps.size(); ++i) {
+            if (i) std::cout << ',';
+            std::cout << bucket.equity_timestamps[i];
+        }
+        std::cout << "],\"strategies\":[";
+        for (std::size_t strategy_index = 0; strategy_index < bucket.strategies.size(); ++strategy_index) {
+            const auto& strategy = bucket.strategies[strategy_index];
+            if (strategy_index) std::cout << ',';
+            std::cout << "{\"instanceId\":\"" << json_escape(strategy.instance_id)
+                      << "\",\"engineId\":" << strategy.strategy_id << ",\"equityCurve\":";
+            print_equity_curve(strategy.results.equity_curve);
+            std::cout << ",\"orders\":";
+            print_orders(strategy.results.hlog);
+            std::cout << '}';
+        }
+        std::cout << "]}";
     }
     std::cout << "]}\n";
 }
@@ -212,40 +241,87 @@ void print_results(const BacktestResults& results, std::size_t input_rows) {
 
 int main(int argc, char** argv) {
     try {
-        if (argc == 2 && std::string(argv[1]) == "--catalog") {
-            print_catalog();
-            return 0;
-        }
-        if (argc != 20 || std::string(argv[1]) != "--run") {
+        if (argc < 7 || std::string(argv[1]) != "--run-plan") {
             throw std::invalid_argument("Invalid runner arguments.");
         }
+        int argument_index = 2;
+        const double initial_capital = std::stod(argv[argument_index++]);
+        const double cost_bps = std::stod(argv[argument_index++]);
+        const std::string allocation_mode = argv[argument_index++];
+        const double fill_latency_seconds = std::stod(argv[argument_index++]);
+        const auto bucket_count = static_cast<std::size_t>(std::stoull(argv[argument_index++]));
+        if (bucket_count == 0) throw std::invalid_argument("A backtest plan needs at least one bucket.");
 
-        const double initial_capital = std::stod(argv[3]);
-        const double cost_bps = std::stod(argv[4]);
-        StrategyConfig base_config;
-        base_config.active = parse_bool(argv[5]);
-        base_config.long_active = parse_bool(argv[6]);
-        base_config.short_active = parse_bool(argv[7]);
-        base_config.stacking = parse_bool(argv[8]);
-        base_config.ts_unit = parse_ts_unit(argv[9]);
-        base_config.date_format = parse_date_format(argv[10]);
+        BacktestConfig config{.initial_capital = initial_capital, .cost_bps = cost_bps};
+        if (allocation_mode == "SHARED") config.capital_allocation = CAPITAL_ALLOCATION_MODE::SHARED;
+        else if (allocation_mode == "EQUAL_PER_STRATEGY") config.capital_allocation = CAPITAL_ALLOCATION_MODE::EQUAL_PER_STRATEGY;
+        else throw std::invalid_argument("Unsupported capital allocation mode.");
+        config.fill_latency_seconds = fill_latency_seconds;
 
-        MACConfig strategy_config;
-        strategy_config.fast_len = static_cast<std::int16_t>(std::stoi(argv[11]));
-        strategy_config.slow_len = static_cast<std::int16_t>(std::stoi(argv[12]));
-        strategy_config.fast_price_field = parse_price_field(argv[13]);
-        strategy_config.slow_price_field = parse_price_field(argv[14]);
-        strategy_config.slnot = std::stod(argv[15]);
-        strategy_config.slpct = std::stod(argv[16]);
-        strategy_config.pos_sizing_mode = parse_sizing_mode(argv[17]);
-        strategy_config.qty = std::stod(argv[18]);
-        strategy_config.equity_pct = std::stod(argv[19]);
+        const auto require_arguments = [&](std::size_t count) {
+            if (count > static_cast<std::size_t>(argc - argument_index)) {
+                throw std::invalid_argument("Backtest plan ended before all bucket configuration was read.");
+            }
+        };
+        const auto& registry = quantogral::strategy_registry();
+        BacktestPlan<OHLCVEvent> plan;
+        plan.buckets.reserve(bucket_count);
+        std::vector<std::vector<std::vector<OHLCVEvent>>> all_feed_data;
+        all_feed_data.reserve(bucket_count);
+        std::vector<std::unique_ptr<Strategy<OHLCVEvent>>> owned_strategies;
+        std::size_t total_input_rows = 0;
+        for (std::size_t bucket_index = 0; bucket_index < bucket_count; ++bucket_index) {
+            require_arguments(2);
+            BacktestBucket<OHLCVEvent> bucket;
+            bucket.id = argv[argument_index++];
+            const auto feed_count = static_cast<std::size_t>(std::stoull(argv[argument_index++]));
+            if (bucket.id.empty() || feed_count == 0) throw std::invalid_argument("Every configured bucket needs an ID and at least one feed.");
+            require_arguments(feed_count * 4 + 1);
+            std::vector<std::vector<OHLCVEvent>> feed_data;
+            feed_data.reserve(feed_count);
+            bucket.feeds.reserve(feed_count);
+            for (std::size_t feed_index = 0; feed_index < feed_count; ++feed_index) {
+                const std::string feed_id = argv[argument_index++];
+                const std::string data_path = argv[argument_index++];
+                const auto ts_unit = parse_ts_unit(argv[argument_index++]);
+                const auto date_format = parse_date_format(argv[argument_index++]);
+                feed_data.push_back(load_ohlcv_csv(data_path, ts_unit, date_format));
+                total_input_rows += feed_data.back().size();
+                bucket.feeds.push_back({feed_id, std::span<const OHLCVEvent>(feed_data.back())});
+            }
 
-        const auto bars = load_ohlcv_csv(argv[2], base_config.ts_unit, base_config.date_format);
-        MAC strategy("ma_cross", strategy_config, base_config);
-        Backtester<OHLCVEvent> backtester(BacktestConfig{.initial_capital = initial_capital, .cost_bps = cost_bps});
-        const auto results = backtester.run(strategy, bars);
-        print_results(results, bars.size());
+            const auto strategy_count = static_cast<std::size_t>(std::stoull(argv[argument_index++]));
+            if (strategy_count == 0) throw std::invalid_argument("Every configured bucket needs at least one strategy.");
+            bucket.strategies.reserve(strategy_count);
+            for (std::size_t strategy_index = 0; strategy_index < strategy_count; ++strategy_index) {
+                require_arguments(4);
+                const std::string instance_id = argv[argument_index++];
+                const std::string strategy_id = argv[argument_index++];
+                const auto connected_feed_count = static_cast<std::size_t>(std::stoull(argv[argument_index++]));
+                require_arguments(connected_feed_count + 1);
+                std::vector<std::string> feed_ids;
+                feed_ids.reserve(connected_feed_count);
+                for (std::size_t i = 0; i < connected_feed_count; ++i) feed_ids.emplace_back(argv[argument_index++]);
+                const auto value_count = static_cast<std::size_t>(std::stoull(argv[argument_index++]));
+                require_arguments(value_count);
+                quantogral::StrategyValues values;
+                for (std::size_t i = 0; i < value_count; ++i) {
+                    const std::string setting = argv[argument_index++];
+                    const auto separator = setting.find('=');
+                    if (separator == std::string::npos || separator == 0) throw std::invalid_argument("Strategy settings must use key=value form.");
+                    values[setting.substr(0, separator)] = setting.substr(separator + 1);
+                }
+                const auto definition = std::find_if(registry.begin(), registry.end(), [&](const auto& item) { return item.id == strategy_id; });
+                if (definition == registry.end()) throw std::invalid_argument("Strategy is not included in this compiled runner: " + strategy_id);
+                owned_strategies.push_back(definition->create(values));
+                bucket.strategies.push_back({instance_id, owned_strategies.back().get(), std::move(feed_ids)});
+            }
+            all_feed_data.push_back(std::move(feed_data));
+            plan.buckets.push_back(std::move(bucket));
+        }
+        if (argument_index != argc) throw std::invalid_argument("Unexpected extra backtest runner arguments.");
+        Backtester<OHLCVEvent> backtester(config);
+        print_results(backtester.run(plan), total_input_rows);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
