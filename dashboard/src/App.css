@@ -242,10 +242,16 @@ code { color: #b8d8fa; }
 .simple-backtest-title-row h1 { margin-bottom: 8px; }
 .backtest-settings-button { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; margin-top: -2px; border: 1px solid #30353b; border-radius: 6px; color: #9ca5ad; background: #14171a; font-size: .9rem; }
 .backtest-settings-button:hover { border-color: #4b5865; color: #e7edf2; background: #202429; }
-.backtest-settings-dialog { width: min(100%, 440px); }
-.backtest-settings-fields { display: grid; gap: 14px; margin-top: 24px; }
+.backtest-settings-panel { overflow: hidden; margin: 4px 0 14px; border: 1px solid #292d32; border-radius: 7px; background: #0e1012; }
+.backtest-settings-panel-toggle { display: flex; width: 100%; min-height: 40px; align-items: center; gap: 8px; border: 0; padding: 0 11px; color: #dbe0e4; background: transparent; text-align: left; }
+.backtest-settings-panel-toggle:hover { color: #fff; background: #15181b; }
+.backtest-settings-summary { margin-left: auto; color: #78828b; font-size: .7rem; }
+.backtest-settings-panel-content { padding: 0 12px 12px; border-top: 1px solid #25292d; }
+.backtest-settings-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
 .backtest-settings-fields .config-field { gap: 6px; }
 .backtest-settings-fields .config-field input { min-height: 36px; }
+.backtest-settings-fields .config-field small { color: #838d96; font-size: .68rem; line-height: 1.4; }
+.backtest-settings-panel-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .strategy-drop-zone { display: grid; justify-items: center; gap: 8px; min-height: 180px; margin-top: 22px; padding: 20px; border: 1px dashed #485563; border-radius: 10px; color: #c3cbd2; background: #101317; text-align: center; }
 .strategy-drop-zone.is-drag-hovering { border-color: #79b9f7; background: #121c25; box-shadow: 0 0 0 3px rgb(99 168 238 / 10%); }
 .drop-zone-icon { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid #354657; border-radius: 50%; color: #79b9f7; background: #17232e; font-size: 1.4rem; }
@@ -447,7 +453,13 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .builder-dialog-option small,
 .app-shell[data-theme="light"] .compile-strategy-option small { color: #68737c; }
 .app-shell[data-theme="light"] .strategy-config-card,
-.app-shell[data-theme="light"] .data-file-row { border-color: #d8dde2; background: #fff; }
+.app-shell[data-theme="light"] .data-file-row,
+.app-shell[data-theme="light"] .backtest-settings-panel { border-color: #d8dde2; background: #fff; }
+.app-shell[data-theme="light"] .backtest-settings-panel-toggle { color: #293138; }
+.app-shell[data-theme="light"] .backtest-settings-panel-toggle:hover { color: #20262b; background: #f4f6f7; }
+.app-shell[data-theme="light"] .backtest-settings-panel-content { border-color: #e0e4e7; }
+.app-shell[data-theme="light"] .backtest-settings-summary,
+.app-shell[data-theme="light"] .backtest-settings-fields .config-field small { color: #6b7780; }
 .app-shell[data-theme="light"] .strategy-config-toggle { color: #293138; }
 .app-shell[data-theme="light"] .strategy-config-id,
 .app-shell[data-theme="light"] .data-file-path { color: #74808a; }
@@ -518,3 +530,4 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .theme-options button:hover { color: #20262b; }
 .app-shell[data-theme="light"] .theme-options button.is-selected { color: #20262b; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 13%); }
 @media (max-width: 640px) { .settings-layout { grid-template-columns: 1fr; gap: 12px; margin-top: 20px; } .settings-nav { display: flex; } .settings-preference-row { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 640px) { .backtest-settings-fields { grid-template-columns: 1fr; } .backtest-settings-summary { display: none; } }

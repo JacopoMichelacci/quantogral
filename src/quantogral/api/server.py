@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
@@ -599,12 +600,19 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Add at least one complete bucket with a strategy and data feed.")
     initial_capital = float(value(backtest, "initial_capital", 100000))
     cost_bps = float(value(backtest, "cost_bps", 0))
+    fill_latency_seconds = float(value(backtest, "fill_latency_seconds", 0))
+    if not math.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValueError("Starting capital must be a finite number greater than zero.")
+    if not math.isfinite(cost_bps) or cost_bps < 0:
+        raise ValueError("Transaction cost must be a finite non-negative number of basis points.")
+    if not math.isfinite(fill_latency_seconds) or fill_latency_seconds < 0:
+        raise ValueError("Fill latency must be a finite non-negative number of seconds.")
     allocation_mode = value(backtest, "capital_allocation", "SHARED")
     if allocation_mode not in {"SHARED", "EQUAL_PER_STRATEGY"}:
         raise ValueError("Capital allocation must be SHARED or EQUAL_PER_STRATEGY.")
     strategy_catalog = {item["id"]: item for item in strategy_catalog_from_headers()}
 
-    arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, "0", str(len(buckets))]
+    arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, str(fill_latency_seconds), str(len(buckets))]
     temp_dirs: list[Any] = []
     prepared_buckets: list[dict[str, Any]] = []
     instance_ids: set[str] = set()

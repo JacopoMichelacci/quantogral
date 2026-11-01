@@ -78,10 +78,11 @@ function loadBacktestSettings() {
     return {
       initial_capital: Number.isFinite(Number(saved.initial_capital)) ? Number(saved.initial_capital) : 100000,
       cost_bps: Number.isFinite(Number(saved.cost_bps)) ? Number(saved.cost_bps) : 0,
+      fill_latency_seconds: Number.isFinite(Number(saved.fill_latency_seconds)) ? Number(saved.fill_latency_seconds) : 0,
       capital_allocation: saved.capital_allocation === 'EQUAL_PER_STRATEGY' ? 'EQUAL_PER_STRATEGY' : 'SHARED',
     }
   } catch {
-    return { initial_capital: 100000, cost_bps: 0, capital_allocation: 'SHARED' }
+    return { initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED' }
   }
 }
 
@@ -237,6 +238,28 @@ function ConfigField({ field, value, onChange }) {
   )
 }
 
+function BacktestSettingsPanel({ open, draft, onToggle, onChange, onSave, onCancel }) {
+  return (
+    <section className={`backtest-settings-panel ${open ? 'is-expanded' : ''}`}>
+      <button aria-expanded={open} className="backtest-settings-panel-toggle" onClick={onToggle} type="button">
+        <span className="tree-chevron">{open ? '⌄' : '›'}</span><strong>Run settings</strong><span className="backtest-settings-summary">Capital, costs, allocation, latency</span>
+      </button>
+      {open && <div className="backtest-settings-panel-content">
+        <div className="backtest-settings-fields">
+          <label className="config-field"><span>Starting capital per bucket</span><input min="0.01" onChange={(event) => onChange('initial_capital', event.target.value)} step="1000" type="number" value={draft.initial_capital} /></label>
+          <label className="config-field"><span>Transaction cost (bps)</span><input min="0" onChange={(event) => onChange('cost_bps', event.target.value)} step="0.1" type="number" value={draft.cost_bps} /></label>
+          <label className="config-field"><span>Fill latency (seconds)</span><input min="0" onChange={(event) => onChange('fill_latency_seconds', event.target.value)} step="0.001" type="number" value={draft.fill_latency_seconds} /><small>Used for quote/tick data. OHLCV backtests fill at the next bar open.</small></label>
+          <label className="config-field"><span>Strategy capital</span><select onChange={(event) => onChange('capital_allocation', event.target.value)} value={draft.capital_allocation}><option value="SHARED">Shared within each bucket</option><option value="EQUAL_PER_STRATEGY">Split evenly per strategy</option></select></label>
+        </div>
+        <div className="backtest-settings-panel-actions">
+          <button className="secondary-button" onClick={onCancel} type="button">Cancel</button>
+          <button className="primary-button" disabled={Number(draft.initial_capital) <= 0 || Number(draft.cost_bps) < 0 || Number(draft.fill_latency_seconds) < 0} onClick={onSave} type="button">Save settings</button>
+        </div>
+      </div>}
+    </section>
+  )
+}
+
 function BacktestBucketPanel({
   bucket, strategies, dataFiles, strategyCatalog, expandedStrategies, selectedForSidebar,
   strategyDropHover, dataDropHover, manualDataPath, onSelectBucket, onAddStrategy,
@@ -387,7 +410,7 @@ function App() {
   const [backtestError, setBacktestError] = useState('')
   const [isRunningBacktest, setIsRunningBacktest] = useState(false)
   const [backtestSettingsOpen, setBacktestSettingsOpen] = useState(false)
-  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, capital_allocation: 'SHARED' })
+  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED' })
   const [backtestConfig, setBacktestConfig] = useState(loadBacktestSettings)
   const [yahooTicker, setYahooTicker] = useState('')
   const [selectedYahooInstruments, setSelectedYahooInstruments] = useState([])
@@ -648,6 +671,29 @@ function App() {
     setItemDialogAction('menu')
     setItemNameDraft('')
     setItemDialogError('')
+  }
+
+  function openBacktestSettings() {
+    if (backtestSettingsOpen) {
+      setBacktestSettingsOpen(false)
+    } else {
+      setBacktestSettingsDraft(backtestConfig)
+      setBacktestSettingsOpen(true)
+    }
+  }
+
+  function updateBacktestSettingsDraft(key, value) {
+    setBacktestSettingsDraft((settings) => ({ ...settings, [key]: value }))
+  }
+
+  function saveBacktestSettings() {
+    setBacktestConfig({
+      initial_capital: Number(backtestSettingsDraft.initial_capital),
+      cost_bps: Number(backtestSettingsDraft.cost_bps),
+      fill_latency_seconds: Number(backtestSettingsDraft.fill_latency_seconds),
+      capital_allocation: backtestSettingsDraft.capital_allocation,
+    })
+    setBacktestSettingsOpen(false)
   }
 
   function beginCreateItem() {
@@ -1276,7 +1322,8 @@ function App() {
           <section className="home-view">
             <button aria-label="Back to Home" className="back-link" onClick={() => navigateToPage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">RESEARCH</div>
-            <h1>Backtesting</h1>
+            <div className="simple-backtest-title-row"><h1>Backtesting</h1><button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button></div>
+            <BacktestSettingsPanel draft={backtestSettingsDraft} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
             <p className="page-description">Choose a backtesting method.</p>
             <div className="workspace-tiles">
               <button className="workspace-tile" onClick={() => navigateToPage('simplebacktesting')} type="button">
@@ -1297,8 +1344,9 @@ function App() {
             <div className="eyebrow">BACKTESTING</div>
             <div className="simple-backtest-title-row">
               <h1>Simple Backtesting</h1>
-              <button aria-label="Backtest settings" className="backtest-settings-button" onClick={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsOpen(true) }} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button>
+              <button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button>
             </div>
+            <BacktestSettingsPanel draft={backtestSettingsDraft} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
               <p className="page-description">Add strategies and market-data files from the project explorer, then configure each strategy.</p>
 
             <form className="simple-backtest-form" onSubmit={runSimpleBacktest}>
@@ -1382,7 +1430,8 @@ function App() {
           <section className="home-view placeholder-view">
             <button aria-label="Back to Backtesting" className="back-link" onClick={() => navigateToPage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">BACKTESTING</div>
-            <h1>GridSearch</h1>
+            <div className="simple-backtest-title-row"><h1>GridSearch</h1><button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button></div>
+            <BacktestSettingsPanel draft={backtestSettingsDraft} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
             <span className="progress-badge">IN PROGRESS</span>
           </section>
         ) : isBuilder ? (
@@ -1478,25 +1527,6 @@ function App() {
           </section>
         )}
       </main>
-
-      {backtestSettingsOpen && (
-        <div className="dialog-backdrop" onMouseDown={() => setBacktestSettingsOpen(false)}>
-          <section aria-labelledby="backtest-settings-title" aria-modal="true" className="path-dialog backtest-settings-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
-            <div className="eyebrow">SIMPLE BACKTESTING</div>
-            <h2 id="backtest-settings-title">Run settings</h2>
-            <p>These defaults are saved in this browser. Starting capital applies independently to each bucket.</p>
-            <div className="backtest-settings-fields">
-              <label className="config-field"><span>Starting capital per bucket</span><input autoFocus min="0.01" onChange={(event) => setBacktestSettingsDraft((settings) => ({ ...settings, initial_capital: event.target.value }))} step="1000" type="number" value={backtestSettingsDraft.initial_capital} /></label>
-              <label className="config-field"><span>Transaction cost (bps)</span><input min="0" onChange={(event) => setBacktestSettingsDraft((settings) => ({ ...settings, cost_bps: event.target.value }))} step="0.1" type="number" value={backtestSettingsDraft.cost_bps} /></label>
-              <label className="config-field"><span>Strategy capital</span><select onChange={(event) => setBacktestSettingsDraft((settings) => ({ ...settings, capital_allocation: event.target.value }))} value={backtestSettingsDraft.capital_allocation}><option value="SHARED">Shared within each bucket</option><option value="EQUAL_PER_STRATEGY">Split evenly per strategy</option></select></label>
-            </div>
-            <div className="dialog-actions">
-              <button className="secondary-button" onClick={() => setBacktestSettingsOpen(false)} type="button">Cancel</button>
-              <button className="primary-button" disabled={Number(backtestSettingsDraft.initial_capital) <= 0 || Number(backtestSettingsDraft.cost_bps) < 0} onClick={() => { setBacktestConfig({ initial_capital: Number(backtestSettingsDraft.initial_capital), cost_bps: Number(backtestSettingsDraft.cost_bps), capital_allocation: backtestSettingsDraft.capital_allocation }); setBacktestSettingsOpen(false) }} type="button">Save settings</button>
-            </div>
-          </section>
-        </div>
-      )}
 
       {builderDialogOpen && (
         <div className="dialog-backdrop" onMouseDown={() => setBuilderDialogOpen(false)}>
