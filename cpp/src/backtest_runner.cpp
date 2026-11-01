@@ -229,7 +229,14 @@ void print_orders(const std::vector<OrderEvent>& orders) {
 }
 
 void print_results(const BacktestRunResults& results, std::size_t input_rows) {
-    std::cout << std::setprecision(15) << "{\"inputRows\":" << input_rows << ",\"buckets\":[";
+    std::cout << std::setprecision(15) << "{\"inputRows\":" << input_rows << ",\"equityCurve\":";
+    print_equity_curve(results.equity_curve);
+    std::cout << ",\"equityTimestamps\":[";
+    for (std::size_t i = 0; i < results.equity_timestamps.size(); ++i) {
+        if (i) std::cout << ',';
+        std::cout << results.equity_timestamps[i];
+    }
+    std::cout << "],\"buckets\":[";
     for (std::size_t bucket_index = 0; bucket_index < results.buckets.size(); ++bucket_index) {
         const auto& bucket = results.buckets[bucket_index];
         if (bucket_index) std::cout << ',';
@@ -239,6 +246,13 @@ void print_results(const BacktestRunResults& results, std::size_t input_rows) {
         for (std::size_t i = 0; i < bucket.equity_timestamps.size(); ++i) {
             if (i) std::cout << ',';
             std::cout << bucket.equity_timestamps[i];
+        }
+        std::cout << "],\"contributionCurve\":";
+        print_equity_curve(bucket.contribution_curve);
+        std::cout << ",\"contributionTimestamps\":[";
+        for (std::size_t i = 0; i < bucket.contribution_timestamps.size(); ++i) {
+            if (i) std::cout << ',';
+            std::cout << bucket.contribution_timestamps[i];
         }
         std::cout << "],\"strategies\":[";
         for (std::size_t strategy_index = 0; strategy_index < bucket.strategies.size(); ++strategy_index) {
@@ -335,7 +349,7 @@ int main(int argc, char** argv) {
                 const auto definition = std::find_if(registry.begin(), registry.end(), [&](const auto& item) { return item.id == strategy_id; });
                 if (definition == registry.end()) throw std::invalid_argument("Strategy is not included in this compiled runner: " + strategy_id);
                 owned_strategies.push_back(definition->create(values));
-                bucket.strategies.push_back({instance_id, owned_strategies.back().get(), std::move(feed_ids)});
+                bucket.strategies.push_back({instance_id, owned_strategies.back().get(), std::move(feed_ids), {}});
             }
             all_feed_data.push_back(std::move(feed_data));
             plan.buckets.push_back(std::move(bucket));

@@ -51,6 +51,25 @@ private:
     bool sent_ = false;
 };
 
+class EquityCaptureBuyStrategy final : public Strategy<OHLCVEvent> {
+public:
+    explicit EquityCaptureBuyStrategy(double quantity) : Strategy("equity capture"), quantity_(quantity) {}
+
+    void on_data(const OHLCVEvent&, const StrategyContext& context,
+                 std::vector<OrderEvent>& orders) override {
+        equities.push_back(context.equity);
+        if (sent_) return;
+        sent_ = true;
+        orders.push_back({.signal = SIGNAL::LONG, .type = ORDER_TYPE::MARKET, .qty = quantity_});
+    }
+
+    std::vector<double> equities;
+
+private:
+    double quantity_;
+    bool sent_ = false;
+};
+
 class QuoteBuyStrategy final : public Strategy<QuoteEvent> {
 public:
     QuoteBuyStrategy() : Strategy("quote buy") {}
@@ -111,7 +130,7 @@ void test_time_order_and_multi_feed_context() {
     BacktestBucket<OHLCVEvent> bucket{
         .id = "shared-market-data",
         .feeds = {{"A", a}, {"B", b}},
-        .strategies = {{"a-only", &a_only, {"A"}}, {"pair", &pair, {"A", "B"}}},
+        .strategies = {{"a-only", &a_only, {"A"}, {}}, {"pair", &pair, {"A", "B"}, {}}},
     };
 
     const auto result = Backtester<OHLCVEvent>({.initial_capital = 1'000.0, .cost_bps = 0.0}).run(bucket);
@@ -137,7 +156,7 @@ void test_shared_capital_by_default() {
     BacktestBucket<OHLCVEvent> bucket{
         .id = "A-only",
         .feeds = {{"A", a}},
-        .strategies = {{"one", &one, {"A"}}, {"two", &two, {"A"}}},
+        .strategies = {{"one", &one, {"A"}, {}}, {"two", &two, {"A"}, {}}},
     };
 
     const auto result = Backtester<OHLCVEvent>({.initial_capital = 1'000.0, .cost_bps = 0.0}).run(bucket);
@@ -158,7 +177,7 @@ void test_equal_capital_sleeves() {
     BacktestBucket<OHLCVEvent> bucket{
         .id = "A-only",
         .feeds = {{"A", a}},
-        .strategies = {{"one", &one, {"A"}}, {"two", &two, {"A"}}},
+        .strategies = {{"one", &one, {"A"}, {}}, {"two", &two, {"A"}, {}}},
     };
 
     const auto result = Backtester<OHLCVEvent>({
@@ -173,6 +192,55 @@ void test_equal_capital_sleeves() {
     assert(std::abs(result.equity_curve.back() - 1'006.0) < 1e-9);
 }
 
+void test_plan_shares_capital_and_timeline_across_buckets() {
+    const std::vector<OHLCVEvent> a{bar(10, 10, 10, 10, 10), bar(20, 10, 12, 10, 12)};
+    const std::vector<OHLCVEvent> b{bar(10, 10, 10, 10, 10), bar(20, 10, 10, 8, 8)};
+    BuyOnceStrategy first(60.0);
+    EquityCaptureBuyStrategy second(40.0);
+    BacktestPlan<OHLCVEvent> plan{
+        .buckets = {
+            {.id = "bucket-a", .feeds = {{"A", a}}, .strategies = {{"strategy-a", &first, {"A"}, {}}}},
+            {.id = "bucket-b", .feeds = {{"B", b}}, .strategies = {{"strategy-b", &second, {"B"}, {}}}},
+        },
+    };
+
+    const auto result = Backtester<OHLCVEvent>({.initial_capital = 1'000.0, .cost_bps = 0.0}).run(plan);
+    assert(result.buckets.size() == 2);
+    assert(result.buckets[0].strategies[0].results.hlog.size() == 1);
+    assert(result.buckets[1].strategies[0].results.hlog.size() == 1);
+    assert(result.buckets[0].strategies[0].results.hlog[0].status == ORDER_STATUS::FILLED);
+    assert(result.buckets[1].strategies[0].results.hlog[0].status == ORDER_STATUS::FILLED);
+    assert(result.equity_timestamps == std::vector<long long>({10, 20}));
+    assert(std::abs(result.equity_curve.back() - 1'040.0) < 1e-9);
+    assert(std::abs(result.buckets[0].contribution_curve.back() - 120.0) < 1e-9);
+    assert(std::abs(result.buckets[1].contribution_curve.back() + 80.0) < 1e-9);
+    assert(std::abs(result.buckets[0].contribution_curve.back() + result.buckets[1].contribution_curve.back()
+                    - (result.equity_curve.back() - 1'000.0)) < 1e-9);
+    assert(!second.equities.empty());
+    assert(std::abs(second.equities.back() - 1'040.0) < 1e-9);
+}
+
+void test_equal_capital_is_split_across_all_buckets() {
+    const std::vector<OHLCVEvent> a{bar(10, 10, 10, 10, 10), bar(20, 10, 10, 10, 10)};
+    const std::vector<OHLCVEvent> b{bar(10, 10, 10, 10, 10), bar(20, 10, 10, 10, 10)};
+    BuyOnceStrategy first(60.0);
+    BuyOnceStrategy second(60.0);
+    BacktestPlan<OHLCVEvent> plan{
+        .buckets = {
+            {.id = "bucket-a", .feeds = {{"A", a}}, .strategies = {{"strategy-a", &first, {"A"}, {}}}},
+            {.id = "bucket-b", .feeds = {{"B", b}}, .strategies = {{"strategy-b", &second, {"B"}, {}}}},
+        },
+    };
+    const auto result = Backtester<OHLCVEvent>({
+        .initial_capital = 1'000.0,
+        .cost_bps = 0.0,
+        .capital_allocation = CAPITAL_ALLOCATION_MODE::EQUAL_PER_STRATEGY,
+    }).run(plan);
+    assert(result.buckets[0].strategies[0].results.hlog[0].status == ORDER_STATUS::REJECTED);
+    assert(result.buckets[1].strategies[0].results.hlog[0].status == ORDER_STATUS::REJECTED);
+    assert(std::abs(result.equity_curve.back() - 1'000.0) < 1e-9);
+}
+
 void test_multi_feed_order_executes_on_its_target_feed() {
     const std::vector<OHLCVEvent> a{bar(10, 10, 10, 10, 10)};
     const std::vector<OHLCVEvent> b{bar(20, 20, 20, 20, 20), bar(30, 21, 21, 21, 21)};
@@ -180,7 +248,7 @@ void test_multi_feed_order_executes_on_its_target_feed() {
     BacktestBucket<OHLCVEvent> bucket{
         .id = "cross-feed",
         .feeds = {{"A", a}, {"B", b}},
-        .strategies = {{"cross-feed-instance", &strategy, {"A", "B"}}},
+        .strategies = {{"cross-feed-instance", &strategy, {"A", "B"}, {}}},
     };
     const auto result = Backtester<OHLCVEvent>({.initial_capital = 1'000.0, .cost_bps = 0.0}).run(bucket);
     const auto& orders = result.strategies.front().results.hlog;
@@ -207,7 +275,7 @@ void test_quote_execution_uses_bid_ask() {
     BacktestBucket<QuoteEvent> bucket{
         .id = "quote-feed",
         .feeds = {{"A", quotes}},
-        .strategies = {{"quote-instance", &strategy, {"A"}}},
+        .strategies = {{"quote-instance", &strategy, {"A"}, {}}},
     };
 
     const auto result = Backtester<QuoteEvent>({.initial_capital = 1'000.0, .cost_bps = 0.0}).run(bucket);
@@ -296,6 +364,8 @@ int main() {
     test_time_order_and_multi_feed_context();
     test_shared_capital_by_default();
     test_equal_capital_sleeves();
+    test_plan_shares_capital_and_timeline_across_buckets();
+    test_equal_capital_is_split_across_all_buckets();
     test_multi_feed_order_executes_on_its_target_feed();
     test_quote_execution_uses_bid_ask();
     test_quote_latency_delays_entry_and_stop_fills();

@@ -70,7 +70,7 @@ public:
     double calculate_qty(const StrategyContext& ctx, double price) const {
         switch (params.pos_sizing_mode) {
             case SIZING_MODE::FIXED:
-                return params.qty;
+                return 11;
             case SIZING_MODE::FIXED_FRACTIONAL_PRICE:
                 return this->sizer.fixed_fractional_price(ctx.equity, price, params.equity_pct);
             case SIZING_MODE::FIXED_FRACTIONAL_SL:

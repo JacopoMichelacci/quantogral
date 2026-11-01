@@ -23,6 +23,13 @@ from urllib.parse import parse_qs, urlparse
 from quantogral.data.providers.yfinance import DataAlreadyExistsError, download_yahoo_history, search_yahoo_symbols
 
 DEFAULT_BUILDER_PATH = "./cpp/include/builder"
+DEFAULT_BACKTEST_SETTINGS = {
+    "initial_capital": 100000,
+    "cost_bps": 0,
+    "fill_latency_seconds": 0,
+    "capital_allocation": "SHARED",
+    "run_mode": "BOTH",
+}
 PROJECT_ROOT = Path(os.environ.get("QUANTOGRAL_ROOT", Path(__file__).resolve().parents[3]))
 CONFIG_PATH = PROJECT_ROOT / ".quantogral" / "config.json"
 CPP_ROOT = PROJECT_ROOT / "cpp"
@@ -216,20 +223,37 @@ def strategy_catalog_from_headers() -> list[dict[str, Any]]:
 
 
 def read_config() -> tuple[dict[str, Any], bool]:
-    """Return workspace config and whether a Builder path has been saved."""
-    if not CONFIG_PATH.exists():
-        return {"builder": {"path": DEFAULT_BUILDER_PATH}}, False
+    """Return local workspace and backtest settings and whether Builder path is saved."""
+    raw_config: dict[str, Any] = {}
     try:
         with CONFIG_PATH.open(encoding="utf-8") as config_file:
-            config = json.load(config_file)
+            loaded_config = json.load(config_file)
+            if isinstance(loaded_config, dict):
+                raw_config = loaded_config
     except (json.JSONDecodeError, OSError):
-        return {"builder": {"path": DEFAULT_BUILDER_PATH}}, False
+        pass
 
-    builder = config.get("builder", {}) if isinstance(config, dict) else {}
-    builder_path = builder.get("path") if isinstance(builder, dict) else None
-    if not isinstance(builder_path, str) or not builder_path.strip():
-        return {"builder": {"path": DEFAULT_BUILDER_PATH}}, False
-    return {"builder": {"path": builder_path}}, True
+    builder = raw_config.get("builder", {})
+    saved_builder_path = builder.get("path") if isinstance(builder, dict) else None
+    configured = isinstance(saved_builder_path, str) and bool(saved_builder_path.strip())
+    builder_path = saved_builder_path
+    if not configured:
+        builder_path = DEFAULT_BUILDER_PATH
+
+    saved_backtest = raw_config.get("backtest", {})
+    saved_backtest = saved_backtest if isinstance(saved_backtest, dict) else {}
+    backtest = dict(DEFAULT_BACKTEST_SETTINGS)
+    for key in ("initial_capital", "cost_bps", "fill_latency_seconds"):
+        candidate = saved_backtest.get(key)
+        if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) and math.isfinite(candidate):
+            backtest[key] = candidate
+    if backtest["initial_capital"] <= 0 or backtest["cost_bps"] < 0 or backtest["fill_latency_seconds"] < 0:
+        backtest = dict(DEFAULT_BACKTEST_SETTINGS)
+    if saved_backtest.get("capital_allocation") in {"SHARED", "EQUAL_PER_STRATEGY"}:
+        backtest["capital_allocation"] = saved_backtest["capital_allocation"]
+    if saved_backtest.get("run_mode") in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
+        backtest["run_mode"] = saved_backtest["run_mode"]
+    return {"builder": {"path": builder_path}, "backtest": backtest}, configured
 
 
 def write_config(builder_path: str) -> None:
@@ -239,6 +263,19 @@ def write_config(builder_path: str) -> None:
     current_config["builder"] = {"path": builder_path}
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=CONFIG_PATH.parent, delete=False) as temporary_file:
         json.dump(current_config, temporary_file, indent=2)
+        temporary_file.write("\n")
+        temporary_path = Path(temporary_file.name)
+    temporary_path.chmod(0o600)
+    temporary_path.replace(CONFIG_PATH)
+
+
+def write_backtest_config(settings: dict[str, Any]) -> None:
+    """Persist backtest settings in the local workspace config file."""
+    config, _ = read_config()
+    config["backtest"] = settings
+    CONFIG_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=CONFIG_PATH.parent, delete=False) as temporary_file:
+        json.dump(config, temporary_file, indent=2)
         temporary_file.write("\n")
         temporary_path = Path(temporary_file.name)
     temporary_path.chmod(0o600)
@@ -342,9 +379,10 @@ WORKSPACE_EDITABLE_TEXT_SUFFIXES = {".hpp", ".h", ".cpp", ".cc", ".cxx", ".c", "
 WORKSPACE_PARQUET_SUFFIXES = {".parquet", ".pq"}
 WORKSPACE_EDITOR_MAX_BYTES = 8 * 1024 * 1024
 WORKSPACE_PARQUET_EDITOR_MAX_ROWS = 5000
+WORKSPACE_PARQUET_PREVIEW_EDGE_ROWS = 500
 
 
-def workspace_file_target(payload: dict[str, Any]) -> tuple[Path, str]:
+def workspace_file_target(payload: dict[str, Any], *, allow_large_parquet_preview: bool = False) -> tuple[Path, str]:
     root = workspace_root(payload.get("scope"))
     target = safe_workspace_path(root, payload.get("path"))
     if not target.is_file():
@@ -352,26 +390,41 @@ def workspace_file_target(payload: dict[str, Any]) -> tuple[Path, str]:
     suffix = target.suffix.lower()
     if suffix not in WORKSPACE_EDITABLE_TEXT_SUFFIXES | WORKSPACE_PARQUET_SUFFIXES:
         raise WorkspaceItemError("The editor supports C/C++ source, text, CSV, and Parquet files.", HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
-    if target.stat().st_size > WORKSPACE_EDITOR_MAX_BYTES:
+    if target.stat().st_size > WORKSPACE_EDITOR_MAX_BYTES and not (allow_large_parquet_preview and suffix in WORKSPACE_PARQUET_SUFFIXES):
         raise WorkspaceItemError("This file is larger than the 8 MB editor limit. Open a smaller file or edit it outside Quantogral.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
     return target, suffix
 
 
-def read_workspace_file(payload: dict[str, Any]) -> dict[str, Any]:
-    target, suffix = workspace_file_target(payload)
+def read_workspace_file(payload: dict[str, Any], *, preview: bool = False) -> dict[str, Any]:
+    target, suffix = workspace_file_target(payload, allow_large_parquet_preview=preview)
     if suffix in WORKSPACE_PARQUET_SUFFIXES:
         try:
             import polars as pl
         except ImportError as error:
             raise RuntimeError("Parquet editing needs the project's Polars dependency. Run `uv sync` and restart Quantogral.") from error
         try:
-            frame = pl.scan_parquet(target).limit(WORKSPACE_PARQUET_EDITOR_MAX_ROWS + 1).collect()
+            parquet_scan = pl.scan_parquet(target)
+            if preview:
+                total_rows = int(parquet_scan.select(pl.len()).collect().item())
+                if total_rows > WORKSPACE_PARQUET_PREVIEW_EDGE_ROWS * 2:
+                    frame = pl.concat([
+                        parquet_scan.head(WORKSPACE_PARQUET_PREVIEW_EDGE_ROWS).collect(),
+                        parquet_scan.tail(WORKSPACE_PARQUET_PREVIEW_EDGE_ROWS).collect(),
+                    ])
+                else:
+                    frame = parquet_scan.head(WORKSPACE_PARQUET_PREVIEW_EDGE_ROWS * 2).collect()
+            else:
+                frame = parquet_scan.limit(WORKSPACE_PARQUET_EDITOR_MAX_ROWS + 1).collect()
         except Exception as error:
             raise WorkspaceItemError(f"Could not read this Parquet file: {error}") from error
-        if frame.height > WORKSPACE_PARQUET_EDITOR_MAX_ROWS:
+        if not preview and frame.height > WORKSPACE_PARQUET_EDITOR_MAX_ROWS:
             raise WorkspaceItemError("The Parquet editor currently supports up to 5,000 rows per file.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         content = json.dumps({"columns": frame.columns, "rows": frame.to_dicts()}, ensure_ascii=False, indent=2, default=str)
-        return {"name": target.name, "format": "parquet-json", "content": content, "rows": frame.height, "columns": frame.columns}
+        return {
+            "name": target.name, "format": "parquet-json", "content": content,
+            "rows": total_rows if preview else frame.height, "columns": frame.columns,
+            "omittedRows": max(0, total_rows - frame.height) if preview else 0,
+        }
     try:
         content = target.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
@@ -483,6 +536,20 @@ def rename_workspace_item(payload: dict[str, Any]) -> dict[str, str]:
     except FileExistsError as error:
         raise WorkspaceItemError("An item with that name already exists.", HTTPStatus.CONFLICT) from error
     return {"name": name, "type": "directory" if is_directory else "file"}
+
+
+def delete_workspace_file(payload: dict[str, Any]) -> dict[str, str]:
+    """Delete one file from a Builder or data workspace; folders are never removed here."""
+    root = workspace_root(payload.get("scope"))
+    relative_path = payload.get("path")
+    target = safe_workspace_path(root, relative_path)
+    if not isinstance(relative_path, str) or not relative_path or target == root or not target.is_file():
+        raise WorkspaceItemError("Choose a file inside the workspace to delete.")
+    try:
+        target.unlink()
+    except OSError as error:
+        raise WorkspaceItemError(f"Could not delete {target.name}: {error}", HTTPStatus.INTERNAL_SERVER_ERROR) from error
+    return {"name": target.name, "type": "file"}
 
 
 def runner_is_current() -> bool:
@@ -614,7 +681,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Capital allocation must be SHARED or EQUAL_PER_STRATEGY.")
     run_mode = value(backtest, "run_mode", "BOTH")
     if run_mode not in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
-        raise ValueError("Choose Both allowed, Long only, Short only, or Compare all.")
+        raise ValueError("Choose Long and short, Long only, Short only, or Compare all.")
     strategy_catalog = {item["id"]: item for item in strategy_catalog_from_headers()}
 
     arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, str(fill_latency_seconds), "BOTH", str(len(buckets))]
@@ -694,11 +761,11 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             prepared_buckets.append({"id": bucket_id, "feeds": prepared_feeds, "strategies": prepared_strategies})
 
         scenario_specs = {
-            "BOTH": [("both", "Both allowed", "BOTH")],
+            "BOTH": [("both", "Long and short", "BOTH")],
             "LONG_ONLY": [("long_only", "Long only", "LONG_ONLY")],
             "SHORT_ONLY": [("short_only", "Short only", "SHORT_ONLY")],
             "COMPARE_ALL": [
-                ("both", "Both allowed", "BOTH"),
+                ("both", "Long and short", "BOTH"),
                 ("long_only", "Long only", "LONG_ONLY"),
                 ("short_only", "Short only", "SHORT_ONLY"),
             ],
@@ -720,6 +787,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
 
     def process_scenario(output: dict[str, Any]) -> dict[str, Any]:
         output_buckets = output.get("buckets", [])
+        orders = []
         for bucket_index, bucket in enumerate(output_buckets):
             bucket["feeds"] = prepared_buckets[bucket_index]["feeds"]
             strategy_metadata = {item["instanceId"]: item for item in prepared_buckets[bucket_index]["strategies"]}
@@ -727,43 +795,12 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 metadata = strategy_metadata[strategy["instanceId"]]
                 strategy["strategyId"] = metadata["strategyId"]
                 strategy["name"] = metadata["name"]
-            equity = bucket.get("equityCurve", [])
-            peak = initial_capital
-            max_drawdown = 0.0
-            for point in equity:
-                peak = max(peak, point)
-                if peak > 0:
-                    max_drawdown = min(max_drawdown, point / peak - 1.0)
-            bucket["metrics"] = {
-                "initialEquity": initial_capital,
-                "finalEquity": equity[-1] if equity else initial_capital,
-                "returnPct": (((equity[-1] if equity else initial_capital) / initial_capital) - 1.0) * 100.0 if initial_capital else 0.0,
-                "maxDrawdownPct": max_drawdown * 100.0,
-                "orders": sum(len(strategy.get("orders", [])) for strategy in bucket.get("strategies", [])),
-            }
-        output["inputRows"] = int(output.get("inputRows", 0))
-        output["buckets"] = output_buckets
-        initial_total = initial_capital * len(output_buckets)
-        aggregate_values: dict[int, list[tuple[int, float]]] = {}
-        orders = []
-        for bucket_index, bucket in enumerate(output_buckets):
-            for timestamp, equity in zip(bucket.get("equityTimestamps", []), bucket.get("equityCurve", [])):
-                aggregate_values.setdefault(timestamp, []).append((bucket_index, equity))
-            for strategy in bucket.get("strategies", []):
                 for order in strategy.get("orders", []):
                     orders.append({**order, "bucketId": bucket["id"], "instanceId": strategy["instanceId"], "strategyId": strategy["strategyId"], "strategyName": strategy["name"]})
-        current_equities = [initial_capital] * len(output_buckets)
-        aggregate_curve = []
-        aggregate_timestamps = []
-        for timestamp in sorted(aggregate_values):
-            for bucket_index, equity in aggregate_values[timestamp]:
-                current_equities[bucket_index] = equity
-            aggregate_timestamps.append(timestamp)
-            aggregate_curve.append(sum(current_equities))
+            bucket["metrics"] = {"orders": sum(len(strategy.get("orders", [])) for strategy in bucket.get("strategies", []))}
+        output["inputRows"] = int(output.get("inputRows", 0))
+        output["buckets"] = output_buckets
         orders.sort(key=lambda order: (order["timestamp"], order["bucketId"], order["instanceId"], order["id"]))
-        final_total = aggregate_curve[-1] if aggregate_curve else initial_total
-        output["equityCurve"] = aggregate_curve
-        output["equityTimestamps"] = aggregate_timestamps
         output["orders"] = orders
         entries: dict[tuple[str, str, int], dict[str, Any]] = {}
         closed_trades = []
@@ -804,9 +841,9 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             })
         equity_timestamps = output.get("equityTimestamps", [])
         equity_curve = output.get("equityCurve", [])
-        initial_total = initial_capital * len(output_buckets)
-        final_total = equity_curve[-1] if equity_curve else initial_total
-        peak = initial_total
+        starting_equity = initial_capital
+        final_equity = equity_curve[-1] if equity_curve else starting_equity
+        peak = starting_equity
         max_drawdown_dollars = 0.0
         max_drawdown_pct = 0.0
         for point in equity_curve:
@@ -815,15 +852,12 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             drawdown_pct = drawdown_dollars / peak if peak > 0 else 0.0
             max_drawdown_dollars = max(max_drawdown_dollars, drawdown_dollars)
             max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
-        final_peak = max([initial_total, *equity_curve])
-        current_drawdown_dollars = final_peak - final_total
-        current_drawdown_pct = current_drawdown_dollars / final_peak if final_peak > 0 else 0.0
         daily_equity: dict[Any, float] = {}
         for timestamp, equity in zip(equity_timestamps, equity_curve):
             day = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).date()
             daily_equity[day] = equity
         daily_returns = []
-        previous_equity = initial_total
+        previous_equity = starting_equity
         for day in sorted(daily_equity):
             current_equity = daily_equity[day]
             if previous_equity > 0:
@@ -835,19 +869,59 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             if volatility > 0:
                 sharpe = statistics.mean(daily_returns) / volatility * math.sqrt(252.0)
         elapsed_years = ((max(equity_timestamps) - min(equity_timestamps)) / 86_400_000.0 / 365.25) if len(equity_timestamps) > 1 else 0.0
-        risk_reward_values = [trade["riskReward"] for trade in closed_trades if trade["riskReward"] is not None]
+        for bucket in output_buckets:
+            contribution_curve = bucket.get("contributionCurve", [])
+            contribution_timestamps = bucket.get("contributionTimestamps", [])
+            bucket_profit = contribution_curve[-1] if contribution_curve else 0.0
+            daily_contributions: dict[Any, float] = {}
+            for timestamp, contribution in zip(contribution_timestamps, contribution_curve):
+                day = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).date()
+                daily_contributions[day] = contribution
+            daily_contribution_returns = []
+            previous_contribution = 0.0
+            for day in sorted(daily_contributions):
+                current_contribution = daily_contributions[day]
+                if initial_capital > 0:
+                    daily_contribution_returns.append((current_contribution - previous_contribution) / initial_capital)
+                previous_contribution = current_contribution
+            bucket_sharpe = None
+            if len(daily_contribution_returns) > 1:
+                contribution_volatility = statistics.stdev(daily_contribution_returns)
+                if contribution_volatility > 0:
+                    bucket_sharpe = statistics.mean(daily_contribution_returns) / contribution_volatility * math.sqrt(252.0)
+            bucket_trade_count = sum(1 for trade in closed_trades if trade["bucketId"] == bucket["id"])
+            bucket["metrics"].update({
+                "profitContributionPct": bucket_profit / initial_capital * 100.0 if initial_capital else 0.0,
+                "contributionSharpe": bucket_sharpe,
+                "tradesPerYear": bucket_trade_count / elapsed_years if elapsed_years > 0 else None,
+            })
+        total_return = final_equity / starting_equity - 1.0 if starting_equity > 0 else None
+        annual_log_return = math.log1p(total_return) / elapsed_years if elapsed_years > 0 and total_return is not None and total_return > -1.0 else None
+        cagr = math.expm1(annual_log_return) * 100.0 if annual_log_return is not None and annual_log_return < 709.0 else None
+        downside_deviation = math.sqrt(sum(min(value, 0.0) ** 2 for value in daily_returns) / len(daily_returns)) if daily_returns else 0.0
+        sortino = statistics.mean(daily_returns) / downside_deviation * math.sqrt(252.0) if downside_deviation > 0 else None
         winning_trades = sum(1 for trade in closed_trades if trade["profit"] > 0)
+        losing_trades = sum(1 for trade in closed_trades if trade["profit"] < 0)
+        gross_wins = sum(trade["profit"] for trade in closed_trades if trade["profit"] > 0)
+        gross_losses = abs(sum(trade["profit"] for trade in closed_trades if trade["profit"] < 0))
+        average_win = gross_wins / winning_trades if winning_trades else None
+        average_loss = gross_losses / losing_trades if losing_trades else None
         output["metrics"] = {
-            "initialEquity": initial_total,
-            "finalEquity": final_total, "currentDrawdownDollars": current_drawdown_dollars,
-            "currentDrawdownPct": current_drawdown_pct * 100.0,
+            "initialEquity": starting_equity, "finalEquity": final_equity,
             "maxDrawdownDollars": max_drawdown_dollars, "maxDrawdownPct": max_drawdown_pct * 100.0,
-            "profitNotional": final_total - initial_total,
-            "profitPct": ((final_total / initial_total) - 1.0) * 100.0 if initial_total else 0.0,
-            "returnPct": ((final_total / initial_total) - 1.0) * 100.0 if initial_total else 0.0,
+            "profitNotional": final_equity - starting_equity,
+            "profitPct": ((final_equity / starting_equity) - 1.0) * 100.0 if starting_equity else 0.0,
+            "returnPct": ((final_equity / starting_equity) - 1.0) * 100.0 if starting_equity else 0.0,
             "sharpe": sharpe,
+            "cagrPct": cagr,
+            "sortino": sortino,
+            "sortinoInfinite": bool(daily_returns and downside_deviation == 0 and statistics.mean(daily_returns) > 0),
+            "calmar": (cagr / 100.0) / max_drawdown_pct if cagr is not None and max_drawdown_pct > 0 else None,
+            "profitFactor": gross_wins / gross_losses if gross_losses > 0 else None,
+            "profitFactorInfinite": bool(gross_wins > 0 and gross_losses == 0),
             "winRatio": winning_trades / len(closed_trades) * 100.0 if closed_trades else None,
-            "averageRiskReward": statistics.mean(risk_reward_values) if risk_reward_values else None,
+            "winLossRatio": average_win / average_loss if average_win is not None and average_loss is not None and average_loss > 0 else None,
+            "winLossRatioInfinite": bool(winning_trades > 0 and losing_trades == 0),
             "averageProfitPerTrade": sum(trade["profit"] for trade in closed_trades) / len(closed_trades) if closed_trades else None,
             "tradeCount": len(closed_trades),
             "tradesPerYear": len(closed_trades) / elapsed_years if elapsed_years > 0 else None,
@@ -948,7 +1022,10 @@ class ConfigHandler(BaseHTTPRequestHandler):
         if parsed_path.path == "/api/workspace/file":
             query = parse_qs(parsed_path.query)
             try:
-                self.send_json(read_workspace_file({"scope": query.get("scope", [""])[0], "path": query.get("path", [""])[0]}))
+                self.send_json(read_workspace_file(
+                    {"scope": query.get("scope", [""])[0], "path": query.get("path", [""])[0]},
+                    preview=query.get("preview", [""])[0] == "1",
+                ))
             except WorkspaceItemError as error:
                 self.send_json({"error": str(error)}, error.status)
             except RuntimeError as error:
@@ -989,10 +1066,17 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         config, builder_configured = read_config()
-        self.send_json({**config, "builderConfigured": builder_configured})
+        raw_backtest_configured = False
+        try:
+            with CONFIG_PATH.open(encoding="utf-8") as config_file:
+                stored_config = json.load(config_file)
+            raw_backtest_configured = isinstance(stored_config, dict) and isinstance(stored_config.get("backtest"), dict)
+        except (json.JSONDecodeError, OSError):
+            pass
+        self.send_json({**config, "builderConfigured": builder_configured, "backtestConfigured": raw_backtest_configured})
 
     def do_PUT(self) -> None:  # noqa: N802
-        if self.path not in {"/api/config/builder", "/api/workspace/items", "/api/workspace/file"}:
+        if self.path not in {"/api/config/builder", "/api/config/backtest", "/api/workspace/items", "/api/workspace/file"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
@@ -1020,6 +1104,29 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, error.status)
             except RuntimeError as error:
                 self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if self.path == "/api/config/backtest":
+            settings = {}
+            try:
+                for key in ("initial_capital", "cost_bps", "fill_latency_seconds"):
+                    value = payload[key]
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                        raise ValueError(f"{key} must be a finite number.")
+                    settings[key] = value
+                if settings["initial_capital"] <= 0 or settings["cost_bps"] < 0 or settings["fill_latency_seconds"] < 0:
+                    raise ValueError("Capital must be positive; costs and latency cannot be negative.")
+                settings["capital_allocation"] = payload["capital_allocation"]
+                if settings["capital_allocation"] not in {"SHARED", "EQUAL_PER_STRATEGY"}:
+                    raise ValueError("Choose a valid capital allocation mode.")
+                settings["run_mode"] = payload["run_mode"]
+                if settings["run_mode"] not in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
+                    raise ValueError("Choose a valid trade direction mode.")
+            except (KeyError, TypeError, ValueError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            write_backtest_config(settings)
+            self.send_json({"backtest": settings})
             return
 
         try:
@@ -1155,6 +1262,23 @@ class ConfigHandler(BaseHTTPRequestHandler):
             return
 
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if self.path != "/api/workspace/items":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(content_length))
+            if not isinstance(payload, dict):
+                raise ValueError("Request body must be a JSON object.")
+        except (json.JSONDecodeError, ValueError):
+            self.send_json({"error": "Request body must be valid JSON."}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            self.send_json(delete_workspace_file(payload))
+        except WorkspaceItemError as error:
+            self.send_json({"error": str(error)}, error.status)
 
     def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")

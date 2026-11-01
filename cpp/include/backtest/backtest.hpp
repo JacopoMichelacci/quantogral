@@ -32,6 +32,8 @@ struct BacktestStrategyBinding {
     std::string instance_id;
     Strategy<Tin>* strategy = nullptr;
     std::vector<std::string> feed_ids;
+    // Optional plan bucket used to attribute P&L while keeping one shared account.
+    std::string bucket_id;
 };
 
 template <typename Tin>
@@ -52,15 +54,28 @@ struct StrategyBacktestResult {
     BacktestResults results;
 };
 
+struct BacktestBucketAttribution {
+    std::string bucket_id;
+    std::vector<double> contribution_curve;
+    std::vector<long long> timestamps;
+};
+
 struct BacktestBucketResults {
     std::string bucket_id;
-    // The combined account curve. In equal-sleeve mode this is the sum of sleeve equity.
+    // Populated by direct single-bucket runs. Plan runs expose one global curve below.
     std::vector<double> equity_curve;
     std::vector<long long> equity_timestamps;
+    // P&L contribution relative to the bucket's initial allocation.
+    std::vector<double> contribution_curve;
+    std::vector<long long> contribution_timestamps;
+    std::vector<BacktestBucketAttribution> bucket_attributions;
     std::vector<StrategyBacktestResult> strategies;
 };
 
 struct BacktestRunResults {
+    // One portfolio curve across every strategy and data bucket in the plan.
+    std::vector<double> equity_curve;
+    std::vector<long long> equity_timestamps;
     std::vector<BacktestBucketResults> buckets;
 };
 
@@ -147,7 +162,7 @@ public:
         BacktestBucket<Tin> bucket{
             .id = "default",
             .feeds = {{feed_id, input}},
-            .strategies = {{instance_id, &strategy, {feed_id}}},
+            .strategies = {{instance_id, &strategy, {feed_id}, {}}},
         };
         auto bucket_results = run(bucket);
         return std::move(bucket_results.strategies.front().results);
@@ -194,6 +209,7 @@ public:
 
         struct StrategyState {
             double cash = 0.0;
+            double attribution_cash = 0.0;
             std::unordered_map<std::string, double> positions;
             std::unordered_map<std::string, double> marks;
             std::unordered_map<std::string, std::vector<OrderEvent>> open_lots;
@@ -212,6 +228,9 @@ public:
         std::vector<std::vector<std::size_t>> subscribers(bucket.feeds.size());
         std::vector<std::unordered_set<std::size_t>> subscribed_feeds(bucket.strategies.size());
         std::vector<std::vector<std::size_t>> subscription_order(bucket.strategies.size());
+        std::vector<std::string> attribution_bucket_ids;
+        std::unordered_map<std::string, std::size_t> attribution_bucket_indices;
+        std::vector<double> attribution_initial_capital;
 
         for (std::size_t strategy_index = 0; strategy_index < bucket.strategies.size(); ++strategy_index) {
             const auto& binding = bucket.strategies[strategy_index];
@@ -227,6 +246,14 @@ public:
             states[strategy_index].cash = config_.capital_allocation == CAPITAL_ALLOCATION_MODE::EQUAL_PER_STRATEGY
                 ? config_.initial_capital / static_cast<double>(bucket.strategies.size())
                 : 0.0;
+            states[strategy_index].attribution_cash = states[strategy_index].cash;
+            const auto attribution_bucket_id = binding.bucket_id.empty() ? bucket.id : binding.bucket_id;
+            const auto [attribution_it, inserted] = attribution_bucket_indices.emplace(attribution_bucket_id, attribution_bucket_ids.size());
+            if (inserted) {
+                attribution_bucket_ids.push_back(attribution_bucket_id);
+                attribution_initial_capital.push_back(0.0);
+            }
+            attribution_initial_capital[attribution_it->second] += states[strategy_index].attribution_cash;
             for (const auto& feed_id : binding.feed_ids) {
                 const auto feed = feed_indices.find(feed_id);
                 if (feed == feed_indices.end()) {
@@ -270,6 +297,10 @@ public:
             return equity;
         };
         BacktestBucketResults bucket_results{.bucket_id = bucket.id};
+        bucket_results.bucket_attributions.reserve(attribution_bucket_ids.size());
+        for (const auto& attribution_bucket_id : attribution_bucket_ids) {
+            bucket_results.bucket_attributions.push_back({.bucket_id = attribution_bucket_id});
+        }
 
         struct Cursor { std::size_t feed_index; std::size_t event_index; };
         const auto later_event = [&bucket](const Cursor& lhs, const Cursor& rhs) {
@@ -324,12 +355,14 @@ public:
                     double& cash = config_.capital_allocation == CAPITAL_ALLOCATION_MODE::SHARED
                         ? shared_cash
                         : state.cash;
+                    const double cash_before_execution = cash;
                     execute_orders(ready_orders, event, timestamp,
                                    cash, position, lots, history, state.id_generator, *bucket.strategies[strategy_index].strategy);
                     for (const auto stop_lot_id : ready_stop_lots) state.pending_stop_lots.erase(stop_lot_id);
                     execute_stop_losses(lots, event, timestamp, eligible_timestamp(timestamp), fill_latency_ms,
                                         waiting, state.pending_stop_lots, cash, position, history,
                                         state.id_generator, *bucket.strategies[strategy_index].strategy);
+                    state.attribution_cash += cash - cash_before_execution;
                     state.marks[feed.id] = BacktestEventTraits<Tin>::mark_price(event, position);
                 }
             }
@@ -383,6 +416,27 @@ public:
             const double total_equity = portfolio_equity();
             bucket_results.equity_timestamps.push_back(timestamp);
             bucket_results.equity_curve.push_back(total_equity);
+            std::vector<double> bucket_contributions(attribution_bucket_ids.size(), 0.0);
+            for (std::size_t strategy_index = 0; strategy_index < bucket.strategies.size(); ++strategy_index) {
+                const auto& binding = bucket.strategies[strategy_index];
+                const auto& attribution_bucket_id = binding.bucket_id.empty() ? bucket.id : binding.bucket_id;
+                const auto attribution_index = attribution_bucket_indices.at(attribution_bucket_id);
+                double strategy_contribution = states[strategy_index].attribution_cash;
+                for (const auto feed_index : subscription_order[strategy_index]) {
+                    const auto& feed_id = bucket.feeds[feed_index].id;
+                    const auto position = states[strategy_index].positions.find(feed_id);
+                    const auto mark = states[strategy_index].marks.find(feed_id);
+                    if (position != states[strategy_index].positions.end() && mark != states[strategy_index].marks.end()) {
+                        strategy_contribution += position->second * mark->second;
+                    }
+                }
+                bucket_contributions[attribution_index] += strategy_contribution;
+            }
+            for (std::size_t i = 0; i < bucket_results.bucket_attributions.size(); ++i) {
+                auto& attribution = bucket_results.bucket_attributions[i];
+                attribution.timestamps.push_back(timestamp);
+                attribution.contribution_curve.push_back(bucket_contributions[i] - attribution_initial_capital[i]);
+            }
             if (config_.capital_allocation == CAPITAL_ALLOCATION_MODE::EQUAL_PER_STRATEGY) {
                 for (std::size_t strategy_index = 0; strategy_index < bucket.strategies.size(); ++strategy_index) {
                     states[strategy_index].results.equity_timestamps.push_back(timestamp);
@@ -413,8 +467,8 @@ public:
                 states[i].results.equity_curve = bucket_results.equity_curve;
                 states[i].results.equity_timestamps = bucket_results.equity_timestamps;
             }
-            // With shared capital, the meaningful equity curve belongs to the
-            // bucket account; individual strategy entries retain their order logs.
+            // Under shared capital, individual strategy entries retain order logs;
+            // the portfolio curve is carried by the bucket/run result.
             bucket_results.strategies.push_back({bucket.strategies[i].instance_id, bucket.strategies[i].strategy->get_id(), std::move(states[i].results)});
         }
         return bucket_results;
@@ -425,13 +479,46 @@ public:
         BacktestRunResults output;
         output.buckets.reserve(plan.buckets.size());
         std::unordered_set<std::string> bucket_ids;
+        std::unordered_set<std::string> feed_ids;
+        BacktestBucket<Tin> portfolio_bucket{.id = "__portfolio__"};
         for (const auto& bucket : plan.buckets) {
             if (bucket.id.empty() || !bucket_ids.insert(bucket.id).second) {
                 throw std::invalid_argument("Bucket IDs in a backtest plan must be non-empty and unique.");
             }
-            // Buckets are independent strategy sleeves, so each gets its own
-            // chronological feed merge; their execution order cannot affect one another.
-            output.buckets.push_back(run(bucket));
+            if (bucket.feeds.empty() || bucket.strategies.empty()) {
+                throw std::invalid_argument("Every backtest bucket needs at least one feed and one strategy.");
+            }
+            for (const auto& feed : bucket.feeds) {
+                if (!feed_ids.insert(feed.id).second) {
+                    throw std::invalid_argument("Feed IDs must be unique across all backtest buckets.");
+                }
+                portfolio_bucket.feeds.push_back(feed);
+            }
+            for (auto binding : bucket.strategies) {
+                binding.bucket_id = bucket.id;
+                portfolio_bucket.strategies.push_back(std::move(binding));
+            }
+        }
+
+        // Buckets only organize feed subscriptions. Flatten them into one event
+        // schedule so all strategies share one account and starting capital.
+        auto portfolio_results = run(portfolio_bucket);
+        output.equity_curve = std::move(portfolio_results.equity_curve);
+        output.equity_timestamps = std::move(portfolio_results.equity_timestamps);
+        auto strategy_result = portfolio_results.strategies.begin();
+        for (const auto& bucket : plan.buckets) {
+            BacktestBucketResults bucket_result{.bucket_id = bucket.id};
+            const auto attribution = std::find_if(portfolio_results.bucket_attributions.begin(), portfolio_results.bucket_attributions.end(),
+                [&bucket](const auto& item) { return item.bucket_id == bucket.id; });
+            if (attribution != portfolio_results.bucket_attributions.end()) {
+                bucket_result.contribution_curve = attribution->contribution_curve;
+                bucket_result.contribution_timestamps = attribution->timestamps;
+            }
+            bucket_result.strategies.reserve(bucket.strategies.size());
+            for (std::size_t i = 0; i < bucket.strategies.size(); ++i, ++strategy_result) {
+                bucket_result.strategies.push_back(std::move(*strategy_result));
+            }
+            output.buckets.push_back(std::move(bucket_result));
         }
         return output;
     }

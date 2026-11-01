@@ -50,6 +50,28 @@ function parseCsvPreview(content, edgeRows = 100) {
   return { header: header ?? [], rows: visibleRows, dataRowCount, omittedRowCount: Math.max(0, dataRowCount - visibleRows.length) }
 }
 
+function WorkspaceDataTable({ columns, rows, rowNumber = (row, index) => row.lineNumber || index + 1, omittedRowCount = 0, totalRows = rows.length, edgeRows = 100 }) {
+  const visibleRows = omittedRowCount > 0
+    ? [...rows.slice(0, edgeRows), ...rows.slice(-edgeRows)]
+    : rows
+  return (
+    <div className="workspace-preview-table-wrap">
+      <div aria-label="Data preview table" className="csv-table-viewport" role="region" tabIndex="0">
+        <table className="csv-data-table">
+          <thead><tr><th className="csv-row-number">#</th>{columns.map((column, index) => <th key={index}>{column || `Column ${index + 1}`}</th>)}</tr></thead>
+          <tbody>
+            {(omittedRowCount > 0 ? visibleRows.slice(0, edgeRows) : visibleRows).map((row, index) => <tr key={row.lineNumber || index}><td className="csv-row-number">{rowNumber(row, index)}</td>{Array.from({ length: Math.max(columns.length, row.values.length) }, (_, columnIndex) => <td key={columnIndex}>{row.values[columnIndex] ?? ''}</td>)}</tr>)}
+            {rows.length === 0 && <tr><td colSpan={columns.length + 1}>No data rows in this file.</td></tr>}
+            {omittedRowCount > 0 && <tr className="csv-omitted-rows"><td colSpan={columns.length + 1}>… {omittedRowCount.toLocaleString()} rows omitted …</td></tr>}
+            {omittedRowCount > 0 && visibleRows.slice(edgeRows).map((row, index) => <tr key={row.lineNumber || index + edgeRows}><td className="csv-row-number">{rowNumber(row, index + edgeRows)}</td>{Array.from({ length: Math.max(columns.length, row.values.length) }, (_, columnIndex) => <td key={columnIndex}>{row.values[columnIndex] ?? ''}</td>)}</tr>)}
+          </tbody>
+        </table>
+      </div>
+      <div className="csv-preview-note">{omittedRowCount > 0 ? `Showing first ${edgeRows} and last ${edgeRows} of ${totalRows.toLocaleString()} data rows.` : `Showing all ${totalRows.toLocaleString()} data rows.`}</div>
+    </div>
+  )
+}
+
 function loadExplorerSettings() {
   try {
     const saved = JSON.parse(window.localStorage.getItem(EXPLORER_SETTINGS_KEY) || '{}')
@@ -138,6 +160,17 @@ function ScriptIcon() {
   )
 }
 
+function setExplorerDragPreview(event) {
+  const source = event.currentTarget
+  const rect = source.getBoundingClientRect()
+  const preview = source.cloneNode(true)
+  preview.classList.add('tree-item-drag-preview')
+  preview.style.width = `${rect.width}px`
+  document.body.appendChild(preview)
+  event.dataTransfer.setDragImage(preview, Math.min(28, rect.width / 2), rect.height / 2)
+  window.setTimeout(() => preview.remove(), 0)
+}
+
 function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelectStrategy, onSelectData, onOpenItemSettings, selectingStrategies = false, compileSelection = {}, onToggleCompileSelection, selectingDownloadFolder = false, onSelectDownloadFolder, isCodeWorkspace = false, onOpenWorkspaceFile }) {
   const isExpanded = Boolean(expandedNodes[nodeKey])
   const scope = nodeKey.startsWith('data/') ? 'data' : 'builder'
@@ -171,6 +204,7 @@ function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelect
             else if (isDataFile) event.dataTransfer.setData('application/x-quantogral-data-file', dataPath)
             else return
             event.dataTransfer.effectAllowed = 'copy'
+            setExplorerDragPreview(event)
           }}
           title={isCodeWorkspace && isEditableFile ? `Open ${node.name}` : strategy ? `Drag or click to add ${strategy.name}` : isDataFile ? `Drag or click to add ${dataPath}` : node.name}
           type="button"
@@ -239,7 +273,7 @@ function ConfigField({ field, value, onChange }) {
   )
 }
 
-function BacktestSettingsPanel({ open, draft, onToggle, onChange, onSave, onCancel }) {
+function BacktestSettingsPanel({ open, draft, error, onToggle, onChange, onSave, onCancel }) {
   return (
     <section className={`backtest-settings-panel ${open ? 'is-expanded' : ''}`}>
       <button aria-expanded={open} className="backtest-settings-panel-toggle" onClick={onToggle} type="button">
@@ -247,12 +281,13 @@ function BacktestSettingsPanel({ open, draft, onToggle, onChange, onSave, onCanc
       </button>
       {open && <div className="backtest-settings-panel-content">
         <div className="backtest-settings-fields">
-          <label className="config-field"><span>Starting capital per bucket</span><input min="0.01" onChange={(event) => onChange('initial_capital', event.target.value)} step="1000" type="number" value={draft.initial_capital} /></label>
+          <label className="config-field"><span>Total starting capital</span><input min="0.01" onChange={(event) => onChange('initial_capital', event.target.value)} step="1000" type="number" value={draft.initial_capital} /></label>
           <label className="config-field"><span>Transaction cost (bps)</span><input min="0" onChange={(event) => onChange('cost_bps', event.target.value)} step="0.1" type="number" value={draft.cost_bps} /></label>
           <label className="config-field"><span>Fill latency (seconds)</span><input min="0" onChange={(event) => onChange('fill_latency_seconds', event.target.value)} step="0.001" type="number" value={draft.fill_latency_seconds} /><small>Used for quote/tick data. OHLCV backtests fill at the next bar open.</small></label>
-          <label className="config-field"><span>Strategy capital</span><select onChange={(event) => onChange('capital_allocation', event.target.value)} value={draft.capital_allocation}><option value="SHARED">Shared within each bucket</option><option value="EQUAL_PER_STRATEGY">Split evenly per strategy</option></select></label>
-          <label className="config-field"><span>Trade directions</span><select onChange={(event) => onChange('run_mode', event.target.value)} value={draft.run_mode}><option value="BOTH">Both allowed</option><option value="LONG_ONLY">Long only</option><option value="SHORT_ONLY">Short only</option><option value="COMPARE_ALL">Compare all three</option></select><small>Compare runs Both, Long only, and Short only independently.</small></label>
+          <label className="config-field"><span>Capital allocation</span><select onChange={(event) => onChange('capital_allocation', event.target.value)} value={draft.capital_allocation}><option value="SHARED">Shared across all strategies</option><option value="EQUAL_PER_STRATEGY">Split evenly across all strategies</option></select></label>
+          <label className="config-field"><span>Trade directions</span><select onChange={(event) => onChange('run_mode', event.target.value)} value={draft.run_mode}><option value="BOTH">Long and short</option><option value="LONG_ONLY">Long only</option><option value="SHORT_ONLY">Short only</option><option value="COMPARE_ALL">Compare all three</option></select><small>Compare runs Long and short, Long only, and Short only independently.</small></label>
         </div>
+        {error && <p className="form-error">{error}</p>}
         <div className="backtest-settings-panel-actions">
           <button className="secondary-button" onClick={onCancel} type="button">Cancel</button>
           <button className="primary-button" disabled={Number(draft.initial_capital) <= 0 || Number(draft.cost_bps) < 0 || Number(draft.fill_latency_seconds) < 0} onClick={onSave} type="button">Save settings</button>
@@ -263,47 +298,125 @@ function BacktestSettingsPanel({ open, draft, onToggle, onChange, onSave, onCanc
 }
 
 function EquityCurveChart({ scenarios }) {
-  const colors = { both: '#77b9f2', long_only: '#6dc792', short_only: '#e29b7b' }
+  const colors = { both: '#dc3038', long_only: '#a8232b', short_only: '#f07178' }
+  const [hoveredPoint, setHoveredPoint] = useState(null)
   const series = scenarios.map((scenario) => {
     const curve = scenario.equityCurve || []
+    const timestamps = scenario.equityTimestamps || []
     const initial = scenario.metrics?.initialEquity || 1
-    const stride = Math.max(1, Math.ceil(curve.length / 600))
-    const values = curve.filter((_, index) => index % stride === 0 || index === curve.length - 1).map((equity) => ((equity / initial) - 1) * 100)
-    return { id: scenario.scenarioId || 'both', label: scenario.scenarioLabel || 'Backtest', values }
+    let peak = initial
+    const values = curve.map((equity, index) => {
+      peak = Math.max(peak, equity)
+      return { timestamp: timestamps[index] ?? index, equity, drawdownDollars: equity - peak, drawdownPct: peak > 0 ? (equity / peak - 1) * 100 : 0 }
+    })
+    return { id: scenario.scenarioId || 'both', label: scenario.scenarioLabel || 'Backtest', initial, values, points: values }
   }).filter((item) => item.values.length)
   if (!series.length) return null
 
-  const allValues = series.flatMap((item) => item.values)
-  let minimum = Math.min(0, ...allValues)
-  let maximum = Math.max(0, ...allValues)
-  if (minimum === maximum) { minimum -= 1; maximum += 1 }
-  const padding = (maximum - minimum) * 0.08
-  minimum -= padding
-  maximum += padding
-  const width = 760
-  const height = 230
-  const left = 54
-  const right = 12
-  const top = 14
-  const bottom = 27
+  const timestamps = series.flatMap((item) => item.values.map((point) => point.timestamp))
+  const timeMinimum = timestamps.reduce((minimum, value) => Math.min(minimum, value), Number.POSITIVE_INFINITY)
+  const timeMaximum = timestamps.reduce((maximum, value) => Math.max(maximum, value), Number.NEGATIVE_INFINITY)
+  const width = 900
+  const left = 88
+  const right = 14
   const plotWidth = width - left - right
-  const plotHeight = height - top - bottom
-  const yFor = (value) => top + ((maximum - value) / (maximum - minimum)) * plotHeight
-  const xFor = (index, length) => left + (length <= 1 ? plotWidth / 2 : (index / (length - 1)) * plotWidth)
-  const guides = [maximum, (maximum + minimum) / 2, minimum]
+  const xFor = (timestamp) => left + (timeMaximum === timeMinimum ? plotWidth / 2 : ((timestamp - timeMinimum) / (timeMaximum - timeMinimum)) * plotWidth)
+  const equityValues = series.flatMap((item) => item.values.map((point) => point.equity))
+  const drawdownDollars = series.flatMap((item) => item.values.map((point) => point.drawdownDollars))
+  const drawdownPercentages = series.flatMap((item) => item.values.map((point) => point.drawdownPct))
+  const formatCurrencyAxis = (value) => `${value < 0 ? '−' : ''}$${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+  const formatPercentAxis = (value) => `${value.toFixed(2)}%`
+  const formatDateAxis = (timestamp) => {
+    const date = new Date(timestamp)
+    const day = String(date.getUTCDate()).padStart(2, '0')
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+    const year = String(date.getUTCFullYear() % 100).padStart(2, '0')
+    return `${day}/${month}/${year}`
+  }
+  const formatTooltipDate = (timestamp) => {
+    const date = new Date(timestamp)
+    return `${formatDateAxis(timestamp)} ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')} UTC`
+  }
+  const maxDrawdownDollars = drawdownDollars.reduce((maximum, value) => Math.max(maximum, -value), 0)
+  const maxDrawdownPercent = drawdownPercentages.reduce((maximum, value) => Math.max(maximum, -value), 0)
+
+  function renderPanel({ title, height, top, bottom, min, max, valueKey, format, showDates = false }) {
+    const range = max - min || 1
+    const plotHeight = height - top - bottom
+    const yFor = (value) => top + ((max - value) / range) * plotHeight
+    const yTicks = [max, max - range / 3, max - (2 * range) / 3, min]
+    const tickCount = timeMinimum === timeMaximum ? 1 : 6
+    const xTicks = Array.from({ length: tickCount }, (_, index) => timeMinimum + (timeMaximum - timeMinimum) * index / Math.max(1, tickCount - 1))
+    function handlePointerMove(event) {
+      const rect = event.currentTarget.getBoundingClientRect()
+      const svgX = (event.clientX - rect.left) * width / rect.width
+      const svgY = (event.clientY - rect.top) * height / rect.height
+      if (svgX < left || svgX > width - right || svgY < top || svgY > height - bottom) {
+        setHoveredPoint(null)
+        return
+      }
+      const targetTimestamp = timeMinimum + ((svgX - left) / plotWidth) * (timeMaximum - timeMinimum)
+      let nearest = null
+      for (const item of series) {
+        let low = 0
+        let high = item.points.length
+        while (low < high) {
+          const middle = (low + high) >> 1
+          if (item.points[middle].timestamp < targetTimestamp) low = middle + 1
+          else high = middle
+        }
+        const candidates = [item.points[Math.max(0, low - 1)], item.points[Math.min(item.points.length - 1, low)]]
+        const point = candidates.reduce((best, candidate) => Math.abs(candidate.timestamp - targetTimestamp) < Math.abs(best.timestamp - targetTimestamp) ? candidate : best)
+        const pointY = yFor(point[valueKey])
+        const distance = Math.abs(pointY - svgY)
+        if (!nearest || distance < nearest.distance) nearest = { item, point, x: xFor(point.timestamp), y: pointY, distance }
+      }
+      if (nearest) setHoveredPoint({ ...nearest, panel: title })
+    }
+    const panelHover = hoveredPoint?.panel === title ? hoveredPoint : null
+    const tooltipWidth = 226
+    const tooltipHeight = 70
+    const tooltipX = panelHover ? Math.max(left + 4, Math.min(width - right - tooltipWidth, panelHover.x + (panelHover.x < width - tooltipWidth - right - 12 ? 12 : -tooltipWidth - 12))) : 0
+    const tooltipY = panelHover ? Math.max(top + 3, Math.min(height - bottom - tooltipHeight, panelHover.y - tooltipHeight - 8)) : 0
+    const hoverProfit = panelHover ? panelHover.point.equity - panelHover.item.initial : 0
+    const hoverProfitPct = panelHover && panelHover.item.initial ? hoverProfit / panelHover.item.initial * 100 : 0
+    const signedMoney = (value) => `${value >= 0 ? '+' : '−'}${reportMoney(Math.abs(value))}`
+    const signedPercent = (value) => `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(2)}%`
+    return <svg aria-label={title} className={`equity-chart ${height < 150 ? 'is-drawdown-chart' : 'is-equity-chart'}`} key={title} onPointerLeave={() => setHoveredPoint(null)} onPointerMove={handlePointerMove} role="img" viewBox={`0 0 ${width} ${height}`}>
+      {xTicks.map((timestamp, index) => <line className="equity-x-gridline" key={`x-${index}`} x1={xFor(timestamp)} x2={xFor(timestamp)} y1={top} y2={height - bottom} />)}
+      {yTicks.map((value, index) => <g key={index}><line className={Math.abs(value) < range * 0.000001 ? 'equity-zero-line' : ''} x1={left} x2={width - right} y1={yFor(value)} y2={yFor(value)} /><text x={left - 10} y={yFor(value) + 3} textAnchor="end">{format(value)}</text></g>)}
+      {showDates && xTicks.map((timestamp, index) => <text key={index} x={xFor(timestamp)} y={height - 4} textAnchor={index === 0 ? 'start' : index === xTicks.length - 1 ? 'end' : 'middle'}>{formatDateAxis(timestamp)}</text>)}
+      {series.map((item) => {
+        const points = item.points.map((point) => `${xFor(point.timestamp)},${yFor(point[valueKey])}`).join(' ')
+        return <g key={item.id} style={{ '--curve-color': colors[item.id] || '#dc3038' }}>
+          <polyline points={points} />
+        </g>
+      })}
+      {panelHover && <g className="equity-chart-hover" pointerEvents="none">
+        <line className="equity-hover-crosshair" x1={panelHover.x} x2={panelHover.x} y1={top} y2={height - bottom} />
+        <circle className="equity-hover-marker" cx={panelHover.x} cy={panelHover.y} r="4" style={{ '--curve-color': colors[panelHover.item.id] || '#dc3038' }} />
+        <rect className="equity-hover-tooltip" height={tooltipHeight} rx="5" width={tooltipWidth} x={tooltipX} y={tooltipY} />
+        <text className="equity-hover-tooltip-title" x={tooltipX + 8} y={tooltipY + 14}>{panelHover.item.label} · {formatTooltipDate(panelHover.point.timestamp)}</text>
+        <text className="equity-hover-tooltip-text" x={tooltipX + 8} y={tooltipY + 29}>Equity: {reportMoney(panelHover.point.equity)}</text>
+        <text className="equity-hover-tooltip-text" x={tooltipX + 8} y={tooltipY + 44}>P&amp;L vs start: {signedMoney(hoverProfit)} ({signedPercent(hoverProfitPct)})</text>
+        <text className="equity-hover-tooltip-text" x={tooltipX + 8} y={tooltipY + 59}>DD from peak: {reportMoney(panelHover.point.drawdownDollars)} ({formatPercentAxis(panelHover.point.drawdownPct)})</text>
+      </g>}
+    </svg>
+  }
+
+  const equityMin = equityValues.reduce((minimum, value) => Math.min(minimum, value), Number.POSITIVE_INFINITY)
+  const equityMax = equityValues.reduce((maximum, value) => Math.max(maximum, value), Number.NEGATIVE_INFINITY)
+  const equityPadding = Math.max((equityMax - equityMin) * 0.06, Math.abs(equityMax) * 0.0005, 1)
+  const dollarFloor = Math.max(maxDrawdownDollars * 1.08, 1)
+  const percentFloor = Math.max(maxDrawdownPercent * 1.08, 0.01)
 
   return (
-    <section aria-label="Backtest equity curve" className="equity-chart-card">
-      <div className="config-section-heading"><h3>Equity curves</h3><span>Return from starting capital</span></div>
-      <svg aria-label="Equity curve return comparison" className="equity-chart" role="img" viewBox={`0 0 ${width} ${height}`}>
-        {guides.map((value, index) => <g key={index}><line x1={left} x2={width - right} y1={yFor(value)} y2={yFor(value)} /><text x={left - 8} y={yFor(value) + 4} textAnchor="end">{value.toFixed(1)}%</text></g>)}
-        <text className="equity-chart-start" x={left} y={height - 5}>Start</text><text className="equity-chart-end" x={width - right} y={height - 5} textAnchor="end">End</text>
-        {series.map((item) => {
-          const points = item.values.map((value, index) => `${xFor(index, item.values.length)},${yFor(value)}`).join(' ')
-          return <polyline key={item.id} points={points} style={{ '--curve-color': colors[item.id] || '#77b9f2' }} />
-        })}
-      </svg>
-      <div className="equity-chart-legend">{series.map((item) => <span key={item.id} style={{ '--curve-color': colors[item.id] || '#77b9f2' }}><i />{item.label}</span>)}</div>
+    <section aria-label="Backtest equity and drawdown charts" className="equity-chart-card">
+      <div className="config-section-heading"><h3>Equity and drawdown</h3><span>Equity shown in account currency · hover a line for exact values</span></div>
+      <div className="equity-chart-panel"><div className="equity-chart-panel-label">Equity value</div>{renderPanel({ title: 'Equity value over time', height: 270, top: 14, bottom: 12, min: equityMin - equityPadding, max: equityMax + equityPadding, valueKey: 'equity', format: formatCurrencyAxis })}</div>
+      <div className="equity-chart-panel drawdown-chart-panel"><div className="equity-chart-panel-label">Drawdown ($)</div>{renderPanel({ title: 'Drawdown in dollars', height: 90, top: 8, bottom: 8, min: -dollarFloor, max: 0, valueKey: 'drawdownDollars', format: formatCurrencyAxis })}</div>
+      <div className="equity-chart-panel drawdown-chart-panel"><div className="equity-chart-panel-label">Drawdown (%)</div>{renderPanel({ title: 'Drawdown in percent', height: 90, top: 8, bottom: 23, min: -percentFloor, max: 0, valueKey: 'drawdownPct', format: formatPercentAxis, showDates: true })}</div>
+      <div className="equity-chart-legend">{series.map((item) => <span key={item.id} style={{ '--curve-color': colors[item.id] || '#dc3038' }}><i />{item.label}</span>)}</div>
     </section>
   )
 }
@@ -312,8 +425,8 @@ function reportMoney(value) {
   return Number.isFinite(value) ? value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }) : '—'
 }
 
-function reportNumber(value, suffix = '') {
-  return Number.isFinite(value) ? `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}${suffix}` : '—'
+function reportNumber(value, suffix = '', maximumFractionDigits = 2) {
+  return Number.isFinite(value) ? `${value.toLocaleString(undefined, { maximumFractionDigits })}${suffix}` : '—'
 }
 
 function reportTimestamp(timestamp) {
@@ -334,16 +447,20 @@ function BacktestReport({ scenarios, compare }) {
       <div className="report-metric-grid">
         {kind === 'general' ? <>
           <div><span>Equity</span><strong>{reportMoney(scenario.metrics.finalEquity)}</strong></div>
-          <div><span>Current drawdown</span><strong>{reportMoney(scenario.metrics.currentDrawdownDollars)} · {reportNumber(scenario.metrics.currentDrawdownPct, '%')}</strong></div>
-          <div><span>Sharpe</span><strong>{reportNumber(scenario.metrics.sharpe)}</strong></div>
+          <div><span>Maximum drawdown</span><strong>{reportMoney(scenario.metrics.maxDrawdownDollars)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
+          <div><span>Sharpe</span><strong>{reportNumber(scenario.metrics.sharpe, '', 4)}</strong></div>
           <div><span>Average profit / trade</span><strong>{reportMoney(scenario.metrics.averageProfitPerTrade)}</strong></div>
           <div><span>Trades / year</span><strong>{reportNumber(scenario.metrics.tradesPerYear)}</strong></div>
         </> : <>
           <div><span>Profit notional</span><strong>{reportMoney(scenario.metrics.profitNotional)}</strong></div>
           <div><span>Profit</span><strong>{reportNumber(scenario.metrics.profitPct, '%')}</strong></div>
           <div><span>Maximum drawdown</span><strong>{reportMoney(scenario.metrics.maxDrawdownDollars)} · {reportNumber(scenario.metrics.maxDrawdownPct, '%')}</strong></div>
+          <div><span>CAGR</span><strong>{reportNumber(scenario.metrics.cagrPct, '%', 4)}</strong></div>
           <div><span>Win ratio</span><strong>{reportNumber(scenario.metrics.winRatio, '%')}</strong></div>
-          <div><span>Average R:R</span><strong>{scenario.metrics.averageRiskReward == null ? '—' : `${reportNumber(scenario.metrics.averageRiskReward)} R`}</strong></div>
+          <div><span>Win/loss ratio</span><strong>{scenario.metrics.winLossRatioInfinite ? '∞' : reportNumber(scenario.metrics.winLossRatio)}</strong></div>
+          <div><span>Sortino</span><strong>{scenario.metrics.sortinoInfinite ? '∞' : reportNumber(scenario.metrics.sortino, '', 4)}</strong></div>
+          <div><span>Calmar</span><strong>{reportNumber(scenario.metrics.calmar, '', 4)}</strong></div>
+          <div><span>Profit factor</span><strong>{scenario.metrics.profitFactorInfinite ? '∞' : reportNumber(scenario.metrics.profitFactor)}</strong></div>
           <div><span>Closed trades</span><strong>{scenario.metrics.tradeCount.toLocaleString()}</strong></div>
           <div><span>Trades / year</span><strong>{reportNumber(scenario.metrics.tradesPerYear)}</strong></div>
           <div><span>Orders</span><strong>{scenario.metrics.orders.toLocaleString()}</strong></div>
@@ -354,7 +471,7 @@ function BacktestReport({ scenarios, compare }) {
 
   return (
     <section className="backtest-report">
-      <div className="config-section-heading"><h2>Report</h2><span>{compare ? 'Three independent runs · same starting capital' : detailScenario.scenarioLabel}</span></div>
+      <div className="config-section-heading"><h2>Portfolio report</h2><span>{compare ? 'Three independent runs · same total starting capital' : `${detailScenario.scenarioLabel} · all buckets combined`}</span></div>
       <nav aria-label="Backtest report sections" className="report-tabs">
         {tabs.map(([id, label]) => <button aria-current={activeTab === id ? 'page' : undefined} className={activeTab === id ? 'is-active' : ''} key={id} onClick={() => setActiveTab(id)} type="button">{label}</button>)}
       </nav>
@@ -368,7 +485,7 @@ function BacktestReport({ scenarios, compare }) {
       </>}
       {activeTab === 'performance' && <>
         <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div>
-        <p className="report-footnote">Sharpe is annualized from daily UTC equity returns using √252. Profit notional includes open mark-to-market P&L; win ratio and average profit use completed trades. Average R:R uses completed trades with a configured hard stop; trades without one are excluded.</p>
+        <p className="report-footnote">Sharpe and Sortino are annualized from daily UTC portfolio returns using √252. CAGR is annualized over the data span; Calmar divides CAGR by maximum drawdown. Win ratio is the percentage of completed trades that made a profit. Win/loss ratio is average winning profit divided by the absolute average losing profit. Profit factor is gross winning profit divided by gross losing profit, so it also reflects how often wins and losses occur. Portfolio profit includes open mark-to-market P&L; trade metrics use completed trades. R multiples in the Trades table require a configured hard stop.</p>
       </>}
       {activeTab === 'trades' && <div className="orders-table-wrap report-table-wrap">
         <table className="orders-table"><thead><tr><th>Bucket</th><th>Strategy</th><th>Side</th><th>Entry time</th><th>Exit time</th><th>Quantity</th><th>Entry</th><th>Exit</th><th>Net profit</th><th>R multiple</th></tr></thead>
@@ -494,12 +611,18 @@ function App() {
   const [builderDialogOpen, setBuilderDialogOpen] = useState(false)
   const [builderDialogView, setBuilderDialogView] = useState('menu')
   const [itemDialog, setItemDialog] = useState(null)
+  const [deleteItemPrompt, setDeleteItemPrompt] = useState(null)
+  const [deleteItemError, setDeleteItemError] = useState('')
+  const [isDeletingItem, setIsDeletingItem] = useState(false)
   const [itemDialogAction, setItemDialogAction] = useState('menu')
   const [itemNameDraft, setItemNameDraft] = useState('')
   const [itemDialogError, setItemDialogError] = useState('')
   const [saveError, setSaveError] = useState('')
   const [fileEditor, setFileEditor] = useState(null)
   const csvPreviewRows = useMemo(() => fileEditor?.csvTableView ? parseCsvPreview(fileEditor.content) : [], [fileEditor])
+  const [workspacePreview, setWorkspacePreview] = useState(null)
+  const workspacePreviewRequest = useRef(0)
+  const workspacePreviewCsv = useMemo(() => workspacePreview?.scope === 'data' && workspacePreview.name.toLowerCase().endsWith('.csv') && !workspacePreview.loading && !workspacePreview.error ? parseCsvPreview(workspacePreview.content) : null, [workspacePreview])
   const [editorSaving, setEditorSaving] = useState(false)
   const [editorError, setEditorError] = useState('')
   const [unsavedPromptOpen, setUnsavedPromptOpen] = useState(false)
@@ -533,7 +656,10 @@ function App() {
   const [backtestResult, setBacktestResult] = useState(null)
   const [activeBacktestScenarioId, setActiveBacktestScenarioId] = useState('both')
   const [backtestError, setBacktestError] = useState('')
+  const [backtestSettingsError, setBacktestSettingsError] = useState('')
   const [isRunningBacktest, setIsRunningBacktest] = useState(false)
+  const [backtestElapsedMs, setBacktestElapsedMs] = useState(null)
+  const backtestStartedAt = useRef(null)
   const [backtestSettingsOpen, setBacktestSettingsOpen] = useState(false)
   const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED' })
   const [backtestConfig, setBacktestConfig] = useState(loadBacktestSettings)
@@ -556,8 +682,12 @@ function App() {
   const [yahooOverwritePrompt, setYahooOverwritePrompt] = useState(null)
 
   useEffect(() => {
-    try { window.localStorage.setItem(BACKTEST_SETTINGS_KEY, JSON.stringify(backtestConfig)) } catch { /* Keep the current settings for this session if storage is unavailable. */ }
-  }, [backtestConfig])
+    if (!isRunningBacktest) return undefined
+    const timer = window.setInterval(() => {
+      if (backtestStartedAt.current !== null) setBacktestElapsedMs(performance.now() - backtestStartedAt.current)
+    }, 100)
+    return () => window.clearInterval(timer)
+  }, [isRunningBacktest])
 
   useEffect(() => {
     try {
@@ -696,6 +826,24 @@ function App() {
     setBacktestResult(null)
   }
 
+  function resetBacktestWorkspace() {
+    setBacktestBuckets([{ id: 'bucket-1', name: 'Bucket 1' }])
+    setActiveBucketId('bucket-1')
+    setBacktestStrategies([])
+    setExpandedBacktestStrategies({})
+    setDataFiles([])
+    setManualDataPath('')
+    setStrategyDropHoverBucket(null)
+    setDataDropHoverBucket(null)
+    strategyInstanceCount.current = 0
+    dataInstanceCount.current = 0
+    bucketInstanceCount.current = 1
+    setBacktestResult(null)
+    setActiveBacktestScenarioId('both')
+    setBacktestError('')
+    setBacktestElapsedMs(null)
+  }
+
   function updateBacktestStrategy(instanceId, section, key, value) {
     setBacktestStrategies((items) => items.map((item) => item.instanceId === instanceId
       ? { ...item, [section]: { ...item[section], [key]: value } }
@@ -712,6 +860,12 @@ function App() {
         const config = await response.json()
         if (isCurrent) {
           setBuilderPath(config.builder.path)
+          const savedSettings = config.backtestConfigured ? config.backtest : loadBacktestSettings()
+          setBacktestConfig(savedSettings)
+          setBacktestSettingsDraft(savedSettings)
+          if (!config.backtestConfigured) {
+            fetch('/api/config/backtest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(savedSettings) }).catch(() => {})
+          }
         }
       } catch (error) {
         if (isCurrent) setSaveError(error.message)
@@ -799,6 +953,7 @@ function App() {
   }
 
   function openBacktestSettings() {
+    setBacktestSettingsError('')
     if (backtestSettingsOpen) {
       setBacktestSettingsOpen(false)
     } else {
@@ -811,15 +966,25 @@ function App() {
     setBacktestSettingsDraft((settings) => ({ ...settings, [key]: value }))
   }
 
-  function saveBacktestSettings() {
-    setBacktestConfig({
+  async function saveBacktestSettings() {
+    const settings = {
       initial_capital: Number(backtestSettingsDraft.initial_capital),
       cost_bps: Number(backtestSettingsDraft.cost_bps),
       fill_latency_seconds: Number(backtestSettingsDraft.fill_latency_seconds),
       capital_allocation: backtestSettingsDraft.capital_allocation,
       run_mode: backtestSettingsDraft.run_mode,
-    })
-    setBacktestSettingsOpen(false)
+    }
+    setBacktestSettingsError('')
+    try {
+      const response = await fetch('/api/config/backtest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Could not save backtest settings.')
+      setBacktestConfig(settings)
+      try { window.localStorage.setItem(BACKTEST_SETTINGS_KEY, JSON.stringify(settings)) } catch { /* The local project config remains the saved copy. */ }
+      setBacktestSettingsOpen(false)
+    } catch (error) {
+      setBacktestSettingsError(error.message)
+    }
   }
 
   function beginCreateItem() {
@@ -862,6 +1027,29 @@ function App() {
       if (requestId !== fileOpenRequest.current) return
       setFileEditor({ ...file, format: '', content: '', savedContent: '', loading: false, error: error.message })
     }
+  }
+
+  async function openWorkspacePreview(file) {
+    const requestId = ++workspacePreviewRequest.current
+    setItemDialog(null)
+    setWorkspacePreview({ ...file, loading: true, content: '' })
+    try {
+      const query = new URLSearchParams({ scope: file.scope, path: file.path, preview: '1' })
+      const response = await fetch(`/api/workspace/file?${query}`)
+      const result = await readApiJson(response, 'file preview')
+      if (!response.ok) throw new Error(result.error || 'Could not preview this file.')
+      if (requestId !== workspacePreviewRequest.current) return
+      const parquetData = result.format === 'parquet-json' ? JSON.parse(result.content) : null
+      setWorkspacePreview({ ...file, ...result, previewRows: parquetData?.rows || [], loading: false })
+    } catch (error) {
+      if (requestId !== workspacePreviewRequest.current) return
+      setWorkspacePreview({ ...file, loading: false, error: error.message })
+    }
+  }
+
+  function closeWorkspacePreview() {
+    workspacePreviewRequest.current += 1
+    setWorkspacePreview(null)
   }
 
   const persistWorkspaceFile = useCallback(async (editor) => {
@@ -1006,6 +1194,40 @@ function App() {
       setItemDialog(null)
     } catch (error) {
       setItemDialogError(error.message)
+    }
+  }
+
+  async function confirmDeleteWorkspaceItem() {
+    if (!deleteItemPrompt || isDeletingItem) return
+    setDeleteItemError('')
+    setIsDeletingItem(true)
+    try {
+      const response = await fetch('/api/workspace/items', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: deleteItemPrompt.scope, path: deleteItemPrompt.path }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error || 'Could not delete this file.')
+      const deleted = deleteItemPrompt
+      setDeleteItemPrompt(null)
+      if (fileEditor?.scope === deleted.scope && fileEditor.path === deleted.path) setFileEditor(null)
+      try {
+        const treeResponse = await fetch('/api/builder/tree')
+        if (!treeResponse.ok) throw new Error('File deleted, but the project explorer could not refresh.')
+        const tree = await treeResponse.json()
+        setBuilderTree(tree.children)
+        setDataTree(tree.dataChildren || [])
+      } catch (error) {
+        setSaveError(error.message)
+      }
+      if (deleted.scope === 'builder') {
+        try { await refreshStrategyCatalog() } catch (error) { setCompileError(`File deleted, but strategy discovery failed: ${error.message}`) }
+      }
+    } catch (error) {
+      setDeleteItemError(error.message)
+    } finally {
+      setIsDeletingItem(false)
     }
   }
 
@@ -1198,6 +1420,8 @@ function App() {
     }
     setBacktestError('')
     setBacktestResult(null)
+    backtestStartedAt.current = performance.now()
+    setBacktestElapsedMs(0)
     setIsRunningBacktest(true)
     try {
       const response = await fetch('/api/backtests/run', {
@@ -1223,13 +1447,17 @@ function App() {
           backtestConfig,
         }),
       })
-      const result = await response.json()
+      const result = await readApiJson(response, 'backtest run')
       if (!response.ok) throw new Error(result.error || 'Backtest failed.')
       setBacktestResult(result)
       setActiveBacktestScenarioId(result.scenarios?.[0]?.scenarioId || result.scenarioId || 'both')
     } catch (error) {
       setBacktestError(error.message)
     } finally {
+      if (backtestStartedAt.current !== null) {
+        setBacktestElapsedMs(performance.now() - backtestStartedAt.current)
+        backtestStartedAt.current = null
+      }
       setIsRunningBacktest(false)
     }
   }
@@ -1249,6 +1477,9 @@ function App() {
   const resultScenarios = backtestResult?.scenarios || (backtestResult ? [backtestResult] : [])
   const activeBacktestReport = resultScenarios.find((scenario) => scenario.scenarioId === activeBacktestScenarioId) || resultScenarios[0]
   const compareBacktestReports = backtestResult?.runMode === 'COMPARE_ALL'
+  const parquetPreviewRows = workspacePreview?.format === 'parquet-json'
+    ? (workspacePreview.previewRows || []).map((row, index) => ({ lineNumber: index + 1, values: (workspacePreview.columns || []).map((column) => row[column] == null ? '' : typeof row[column] === 'object' ? JSON.stringify(row[column]) : String(row[column])) }))
+    : []
   const yahooFilenamePreview = yahooFilenameTemplate
     .replaceAll('{name}', selectedYahooInstruments[0]?.symbol || 'AAPL')
     .replaceAll('{symbol}', selectedYahooInstruments[0]?.symbol || 'AAPL')
@@ -1453,7 +1684,7 @@ function App() {
             <button aria-label="Back to Home" className="back-link" onClick={() => navigateToPage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">RESEARCH</div>
             <div className="simple-backtest-title-row"><h1>Backtesting</h1><button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button></div>
-            <BacktestSettingsPanel draft={backtestSettingsDraft} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
+            <BacktestSettingsPanel draft={backtestSettingsDraft} error={backtestSettingsError} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsError(''); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
             <p className="page-description">Choose a backtesting method.</p>
             <div className="workspace-tiles">
               <button className="workspace-tile" onClick={() => navigateToPage('simplebacktesting')} type="button">
@@ -1476,13 +1707,16 @@ function App() {
               <h1>Simple Backtesting</h1>
               <button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button>
             </div>
-            <BacktestSettingsPanel draft={backtestSettingsDraft} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
+            <BacktestSettingsPanel draft={backtestSettingsDraft} error={backtestSettingsError} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsError(''); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
               <p className="page-description">Add strategies and market-data files from the project explorer, then configure each strategy.</p>
 
             <form className="simple-backtest-form" onSubmit={runSimpleBacktest}>
               <div className="backtest-buckets-toolbar">
-                <div><h2>Buckets</h2><p>Each bucket is an independent account. Strategies in a bucket share its capital and process its feeds in timestamp order.</p></div>
-                <button className="secondary-button" onClick={addBacktestBucket} type="button">+ Add bucket</button>
+                <div><h2>Buckets</h2><p>Buckets group feeds for strategies that need different data. All buckets share the same backtest account and process events in timestamp order.</p></div>
+                <div className="backtest-buckets-toolbar-actions">
+                  <button className="secondary-button" disabled={isRunningBacktest} onClick={resetBacktestWorkspace} type="button">Reset backtest</button>
+                  <button className="secondary-button" onClick={addBacktestBucket} type="button">+ Add bucket</button>
+                </div>
               </div>
               {backtestBuckets.map((bucket) => <div className="backtest-bucket-wrap" key={bucket.id}>
                 {backtestBuckets.length > 1 && <button aria-label={`Remove ${bucket.name}`} className="bucket-remove-button" onClick={() => removeBacktestBucket(bucket.id)} type="button">Remove bucket</button>}
@@ -1526,6 +1760,7 @@ function App() {
               <button className="primary-button run-backtest-button" disabled={!compilation.current || backtestStrategies.length === 0 || dataFiles.length === 0 || backtestStrategies.some((strategy) => strategy.feedIds.length === 0) || isRunningBacktest} type="submit">
                 {isRunningBacktest ? (backtestConfig.run_mode === 'COMPARE_ALL' ? 'Running 3 independent scenarios…' : 'Running bucketed C++ backtest…') : 'Run backtest'}
               </button>
+              {backtestElapsedMs !== null && <span aria-live="polite" className="backtest-elapsed-time">{isRunningBacktest ? 'Elapsed' : 'Run time'}: {backtestElapsedMs < 1000 ? `${Math.round(backtestElapsedMs)} ms` : `${(backtestElapsedMs / 1000).toFixed(2)} s`}</span>}
             </form>
 
             {backtestResult && (
@@ -1539,10 +1774,12 @@ function App() {
                   {activeBacktestReport.buckets.map((bucket) => <article className="bucket-result-card" key={bucket.id}>
                     <div className="config-section-heading"><h3>{backtestBuckets.find((item) => item.id === bucket.id)?.name || bucket.id}</h3><span>{bucket.strategies.length} strategies · {bucket.feeds.length} feeds</span></div>
                     <div className="bucket-result-details">
-                      <span>Equity <strong>{bucket.metrics.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong></span>
-                      <span>Return <strong>{bucket.metrics.returnPct.toFixed(2)}%</strong></span>
-                      <span>Drawdown <strong>{bucket.metrics.maxDrawdownPct.toFixed(2)}%</strong></span>
+                      <span>Orders <strong>{bucket.metrics.orders.toLocaleString()}</strong></span>
+                      <span>Profit contribution <strong>{reportNumber(bucket.metrics.profitContributionPct, '%')}</strong></span>
+                      <span>Sharpe contribution <strong>{reportNumber(bucket.metrics.contributionSharpe, '', 4)}</strong></span>
+                      <span>Trades / year <strong>{reportNumber(bucket.metrics.tradesPerYear)}</strong></span>
                     </div>
+                    <p className="bucket-contribution-note">Contribution to the shared portfolio; profit % uses total starting capital.</p>
                     <div className="bucket-result-strategies">{bucket.strategies.map((strategy) => <span key={strategy.instanceId}>{strategy.name} <code>{strategy.instanceId}</code> · {strategy.orders.length} orders</span>)}</div>
                   </article>)}
                 </div>
@@ -1555,7 +1792,7 @@ function App() {
             <button aria-label="Back to Backtesting" className="back-link" onClick={() => navigateToPage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">BACKTESTING</div>
             <div className="simple-backtest-title-row"><h1>GridSearch</h1><button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button></div>
-            <BacktestSettingsPanel draft={backtestSettingsDraft} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
+            <BacktestSettingsPanel draft={backtestSettingsDraft} error={backtestSettingsError} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsError(''); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
             <span className="progress-badge">IN PROGRESS</span>
           </section>
         ) : isBuilder ? (
@@ -1655,6 +1892,7 @@ function App() {
       {builderDialogOpen && (
         <div className="dialog-backdrop" onMouseDown={() => setBuilderDialogOpen(false)}>
           <section aria-labelledby="builder-dialog-title" aria-modal="true" className="path-dialog builder-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <button aria-label="Close builder settings" className="dialog-close-button" onClick={() => setBuilderDialogOpen(false)} type="button">×</button>
             <div className="eyebrow">BUILDER SETTINGS</div>
             <h2 id="builder-dialog-title">{builderDialogView === 'menu' ? 'Builder' : builderDialogView === 'path' ? 'Builder folder' : 'Manage compilation'}</h2>
 
@@ -1716,12 +1954,15 @@ function App() {
       {itemDialog && (
         <div className="dialog-backdrop" onMouseDown={() => setItemDialog(null)}>
           <section aria-labelledby="item-dialog-title" aria-modal="true" className="path-dialog item-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <button aria-label="Close item settings" className="dialog-close-button" onClick={() => setItemDialog(null)} type="button">×</button>
             <div className="eyebrow">{itemDialog.scope === 'data' ? 'DATA' : 'BUILDER'} · ITEM SETTINGS</div>
             <h2 id="item-dialog-title">{itemDialogAction === 'menu' ? itemDialog.name : itemDialogAction === 'create' ? `Create in ${itemDialog.name}` : `Rename ${itemDialog.name}`}</h2>
             {itemDialogAction === 'menu' ? (
               <div className="builder-dialog-options">
                 {itemDialog.type === 'directory' && <button className="builder-dialog-option" onClick={beginCreateItem} type="button"><span><strong>Create here</strong><small>Add a folder or file inside {itemDialog.name}.</small></span><span aria-hidden="true">›</span></button>}
+                {itemDialog.type === 'file' && <button className="builder-dialog-option" onClick={() => openWorkspacePreview(itemDialog)} type="button"><span><strong>View</strong><small>Preview this file in a window.</small></span><span aria-hidden="true">›</span></button>}
                 {!itemDialog.isRoot && <button className="builder-dialog-option" onClick={beginRenameItem} type="button"><span><strong>Rename</strong><small>Change this {itemDialog.type} name.</small></span><span aria-hidden="true">›</span></button>}
+                {itemDialog.type === 'file' && <button className="builder-dialog-option danger-dialog-option" onClick={() => { setDeleteItemError(''); setDeleteItemPrompt(itemDialog); setItemDialog(null) }} type="button"><span><strong>Remove file</strong><small>Delete this file from the workspace.</small></span><span aria-hidden="true">›</span></button>}
               </div>
             ) : (
               <form onSubmit={submitWorkspaceItem}>
@@ -1740,9 +1981,50 @@ function App() {
         </div>
       )}
 
+      {deleteItemPrompt && (
+        <div className="dialog-backdrop" onMouseDown={() => !isDeletingItem && setDeleteItemPrompt(null)}>
+          <section aria-labelledby="delete-item-title" aria-modal="true" className="path-dialog delete-item-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <button aria-label="Close delete confirmation" className="dialog-close-button" disabled={isDeletingItem} onClick={() => setDeleteItemPrompt(null)} type="button">×</button>
+            <div className="eyebrow">{deleteItemPrompt.scope === 'data' ? 'DATA' : 'BUILDER'} · DELETE FILE</div>
+            <h2 id="delete-item-title">Are you sure you want to delete this file?</h2>
+            <p><strong>{deleteItemPrompt.name}</strong> will be permanently removed. This action cannot be undone.</p>
+            {deleteItemError && <p className="form-error">{deleteItemError}</p>}
+            <div className="dialog-actions">
+              <button className="secondary-button" disabled={isDeletingItem} onClick={() => setDeleteItemPrompt(null)} type="button">Cancel</button>
+              <button className="danger-button" disabled={isDeletingItem} onClick={confirmDeleteWorkspaceItem} type="button">{isDeletingItem ? 'Deleting…' : 'Delete file'}</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {workspacePreview && (
+        <div className="dialog-backdrop preview-dialog-backdrop" onMouseDown={closeWorkspacePreview}>
+          <section aria-labelledby="workspace-preview-title" aria-modal="true" className="path-dialog workspace-preview-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <button aria-label="Close file preview" className="dialog-close-button" onClick={closeWorkspacePreview} type="button">×</button>
+            <div className="eyebrow">{workspacePreview.scope === 'data' ? 'DATA FILE' : 'SOURCE FILE'} · VIEW</div>
+            <h2 id="workspace-preview-title">{workspacePreview.name}</h2>
+            <p className="workspace-preview-path"><code>{workspacePreview.scope === 'data' ? `./data/${workspacePreview.path}` : `${builderPath.replace(/\/$/, '')}/${workspacePreview.path}`}</code></p>
+            <div className="workspace-preview-content">
+              {workspacePreview.loading && <p className="file-preview-loading">Loading preview…</p>}
+              {workspacePreview.error && <p className="form-error">{workspacePreview.error}</p>}
+              {!workspacePreview.loading && !workspacePreview.error && workspacePreviewCsv && <WorkspaceDataTable columns={workspacePreviewCsv.header} rows={workspacePreviewCsv.rows} rowNumber={(row) => row.lineNumber} omittedRowCount={workspacePreviewCsv.omittedRowCount} totalRows={workspacePreviewCsv.dataRowCount} />}
+              {!workspacePreview.loading && !workspacePreview.error && workspacePreview.format === 'parquet-json' && <WorkspaceDataTable columns={workspacePreview.columns || []} rows={parquetPreviewRows} omittedRowCount={workspacePreview.omittedRows || 0} totalRows={workspacePreview.rows || parquetPreviewRows.length} edgeRows={500} />}
+              {!workspacePreview.loading && !workspacePreview.error && !workspacePreviewCsv && workspacePreview.format !== 'parquet-json' && (
+                <div className="workspace-preview-code-wrap">
+                  <div aria-hidden="true" className="workspace-preview-line-numbers">{Array.from({ length: Math.max(1, workspacePreview.content.split('\n').length) }, (_, index) => <span key={index}>{index + 1}</span>)}</div>
+                  <pre className="workspace-preview-code">{workspacePreview.content}</pre>
+                </div>
+              )}
+            </div>
+            <div className="dialog-actions"><span className="workspace-preview-format">{workspacePreview.format === 'parquet-json' ? `Parquet data · ${Number(workspacePreview.rows || 0).toLocaleString()} rows` : workspacePreviewCsv ? 'CSV data' : 'Text · UTF-8'}</span><button className="secondary-button" onClick={closeWorkspacePreview} type="button">Close</button></div>
+          </section>
+        </div>
+      )}
+
       {yahooOverwritePrompt && (
         <div className="dialog-backdrop" onMouseDown={backFromYahooOverwrite}>
           <section aria-labelledby="yahoo-overwrite-title" aria-modal="true" className="path-dialog yahoo-overwrite-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <button aria-label="Close overwrite prompt" className="dialog-close-button" disabled={isYahooDownloading} onClick={backFromYahooOverwrite} type="button">×</button>
             <div className="eyebrow">DATA · EXISTING FILE</div>
             <h2 id="yahoo-overwrite-title">Data already stored</h2>
             <p>A file with this name is already in the selected destination:</p>
@@ -1759,6 +2041,7 @@ function App() {
       {unsavedPromptOpen && (
         <div className="dialog-backdrop" onMouseDown={() => resolveUnsavedPrompt('cancel')}>
           <section aria-labelledby="unsaved-changes-title" aria-modal="true" className="path-dialog unsaved-changes-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+            <button aria-label="Close unsaved changes prompt" className="dialog-close-button" disabled={editorSaving} onClick={() => resolveUnsavedPrompt('cancel')} type="button">×</button>
             <div className="eyebrow">CODE WORKSPACE · UNSAVED FILE</div>
             <h2 id="unsaved-changes-title">Save your changes?</h2>
             <p>You have unsaved changes in <strong>{fileEditor?.name}</strong>.</p>

@@ -64,6 +64,7 @@ button { cursor: pointer; }
 .script-item { cursor: default; }
 .script-item.draggable-strategy { cursor: grab; }
 .script-item.draggable-strategy:active { cursor: grabbing; }
+.tree-item-drag-preview { position: fixed !important; z-index: 1000; top: -1000px; left: -1000px; min-height: 38px; border: 1px solid #5688b2 !important; color: #f3f6f8 !important; background: #252b31 !important; box-shadow: 0 8px 22px rgb(0 0 0 / 38%); opacity: 1 !important; pointer-events: none; }
 .tree-indent { width: 9px; flex: 0 0 9px; }
 .directory-item:focus-visible, .builder-item:focus-visible, .builder-settings:focus-visible { outline: 2px solid #63a8ee; outline-offset: 1px; }
 .builder-row { position: relative; }
@@ -168,7 +169,10 @@ code { color: #b8d8fa; }
 .secondary-button { border: 1px solid #3a4047; border-radius: 6px; padding: 9px 13px; color: #c5cbd0; background: transparent; font-size: .88rem; }
 .secondary-button:hover { color: #fff; background: #24272b; }
 .dialog-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 48%); }
-.path-dialog { width: min(100%, 540px); padding: 26px; border: 1px solid #343940; border-radius: 10px; background: #16191d; box-shadow: 0 20px 60px rgb(0 0 0 / 48%); }
+.path-dialog { position: relative; width: min(100%, 540px); padding: 26px; border: 1px solid #343940; border-radius: 10px; background: #16191d; box-shadow: 0 20px 60px rgb(0 0 0 / 48%); }
+.dialog-close-button { position: absolute; top: 10px; right: 12px; display: grid; width: 30px; height: 30px; place-items: center; border: 0; border-radius: 5px; padding: 0; color: #879099; background: transparent; font-size: 1.35rem; line-height: 1; cursor: pointer; }
+.dialog-close-button:hover { color: #f1f3f5; background: #282d32; }
+.dialog-close-button:disabled { cursor: not-allowed; opacity: .45; }
 .yahoo-overwrite-dialog { display: grid; gap: 12px; }
 .yahoo-overwrite-dialog h2, .yahoo-overwrite-dialog p { margin: 0; }
 .yahoo-overwrite-files { display: grid; gap: 6px; max-height: 180px; overflow: auto; margin: 0; padding: 9px 10px 9px 28px; border: 1px solid #493c32; border-radius: 6px; color: #e5c9aa; background: #1d1916; font-size: .76rem; }
@@ -178,6 +182,26 @@ code { color: #b8d8fa; }
 .builder-dialog-options { display: grid; gap: 10px; margin-top: 24px; }
 .builder-dialog-option { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px; border: 1px solid #30353b; border-radius: 8px; color: #e7edf2; background: #111316; text-align: left; }
 .builder-dialog-option:hover { border-color: #4b5865; background: #1b1f23; }
+.builder-dialog-option.danger-dialog-option strong { color: #ef9a9a; }
+.builder-dialog-option.danger-dialog-option:hover { border-color: #704141; background: #211718; }
+.delete-item-dialog > p { margin: 0; color: #aeb5bc; font-size: .9rem; line-height: 1.5; }
+.delete-item-dialog > p strong { color: #e6ebef; overflow-wrap: anywhere; }
+.danger-button { border: 1px solid #8b3d3d; border-radius: 6px; padding: 9px 13px; color: #fff; background: #9e3e3e; font-size: .88rem; font-weight: 700; }
+.danger-button:hover { background: #b44949; }
+.danger-button:disabled { cursor: not-allowed; opacity: .5; }
+.preview-dialog-backdrop { z-index: 32; }
+.workspace-preview-dialog { display: grid; width: min(100%, 1100px); height: min(80vh, 780px); max-height: calc(100vh - 48px); grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: 12px; }
+.workspace-preview-dialog h2, .workspace-preview-dialog > p { margin: 0; }
+.workspace-preview-path { min-width: 0; overflow-wrap: anywhere; color: #879099 !important; font-size: .76rem !important; }
+.workspace-preview-content { display: flex; min-height: 0; overflow: auto; border: 1px solid #30363d; border-radius: 7px; background: #0e1012; }
+.workspace-preview-table-wrap { display: flex; width: 100%; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; }
+.workspace-preview-table-wrap .csv-table-viewport { min-height: 0; flex: 1; }
+.workspace-preview-code-wrap { display: flex; width: max-content; min-width: 100%; min-height: 100%; color: #dce3e8; background: #0e1012; font-family: SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: .78rem; line-height: 1.55; }
+.workspace-preview-line-numbers { position: sticky; left: 0; display: grid; align-content: start; padding: 12px 10px; border-right: 1px solid #272d32; color: #6f7982; background: #111417; text-align: right; user-select: none; }
+.workspace-preview-line-numbers span { min-height: 1.55em; }
+.workspace-preview-code { min-width: max-content; margin: 0; padding: 12px 14px; color: inherit; font: inherit; white-space: pre; }
+.file-preview-loading { padding: 16px; color: #aeb5bc; font-size: .85rem; }
+.workspace-preview-format { margin-right: auto; color: #89939c; font-size: .72rem; }
 .builder-dialog-option > span:first-child, .compile-strategy-option > span { display: grid; gap: 5px; }
 .builder-dialog-option small, .compile-strategy-option small { color: #929ba4; font-size: .78rem; }
 .compile-status { display: flex; align-items: center; gap: 9px; margin: 20px 0; padding: 11px 12px; border: 1px solid #403737; border-radius: 7px; color: #cfaaaa; background: #1b1515; font-size: .82rem; }
@@ -282,6 +306,8 @@ code { color: #b8d8fa; }
 .data-file-row .tree-icon { width: 13px; height: 15px; flex: 0 0 13px; }
 .backtest-buckets-toolbar, .backtest-bucket-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .backtest-buckets-toolbar { margin: 4px 0 2px; }
+.backtest-buckets-toolbar-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.backtest-buckets-toolbar-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .backtest-buckets-toolbar h2, .backtest-bucket-heading h2 { margin: 3px 0 0; color: #e8edf1; font-size: 1rem; }
 .backtest-buckets-toolbar p { margin: 4px 0 0; color: #89929b; font-size: .76rem; }
 .backtest-bucket-wrap { position: relative; display: grid; gap: 8px; }
@@ -320,6 +346,7 @@ code { color: #b8d8fa; }
 .engine-notice { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 12px; border: 1px solid #3a3630; border-radius: 7px; color: #cbbf9e; background: #1a1812; font-size: .78rem; }
 .run-backtest-button { justify-self: start; min-width: 150px; }
 .run-backtest-button:disabled, .compile-actions button:disabled { cursor: not-allowed; opacity: .5; }
+.backtest-elapsed-time { color: #879099; font-size: .72rem; }
 .backtest-results { margin-top: 24px; }
 .bucket-result-list { display: grid; gap: 8px; margin: 12px 0 16px; }
 .bucket-result-card { display: grid; gap: 9px; padding: 11px; border: 1px solid #292d32; border-radius: 7px; background: #0d0f11; }
@@ -327,16 +354,27 @@ code { color: #b8d8fa; }
 .bucket-result-card h3 { margin: 0; color: #dfe5e9; font-size: .82rem; }
 .bucket-result-details { display: flex; flex-wrap: wrap; gap: 16px; color: #8c969e; font-size: .72rem; }
 .bucket-result-details strong { margin-left: 4px; color: #e6ebef; font-size: .78rem; }
+.bucket-contribution-note { margin: -3px 0 0; color: #77818a; font-size: .68rem; }
 .bucket-result-strategies { display: flex; flex-wrap: wrap; gap: 8px 14px; color: #b3bdc5; font-size: .7rem; }
 .bucket-result-strategies code { color: #7d8992; }
 .equity-chart-card { margin: 14px 0; padding: 12px; border: 1px solid #292d32; border-radius: 7px; background: #0d0f11; }
 .equity-chart-card .config-section-heading { margin-bottom: 8px; }
 .equity-chart-card .config-section-heading h3 { margin: 0; color: #dce2e7; font-size: .82rem; }
-.equity-chart { display: block; width: 100%; height: auto; max-height: 300px; overflow: visible; }
-.equity-chart line { stroke: #282d32; stroke-width: 1; }
-.equity-chart text { fill: #78838c; font-size: 11px; font-family: inherit; }
-.equity-chart polyline { fill: none; stroke: var(--curve-color); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.equity-chart-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 8px 0 0 54px; }
+.equity-chart-panel { min-width: 0; }
+.equity-chart-panel-label { margin: 5px 0 -2px 3px; color: #a6b0b8; font-size: .67rem; font-weight: 650; }
+.drawdown-chart-panel { border-top: 1px solid #282d32; }
+.equity-chart { display: block; width: 100%; height: auto; overflow: visible; cursor: crosshair; }
+.equity-chart line { stroke: #282d32; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.equity-chart line.equity-x-gridline { stroke-dasharray: 2 4; opacity: .55; }
+.equity-chart line.equity-zero-line { stroke: #59636b; stroke-width: 1.1; }
+.equity-chart text { fill: #919ca5; font-size: 11px; font-family: inherit; font-variant-numeric: tabular-nums; }
+.equity-chart polyline { fill: none; stroke: var(--curve-color); stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.equity-chart .equity-hover-crosshair { stroke: #b8c2ca; stroke-width: 1; stroke-dasharray: 3 3; opacity: .8; }
+.equity-chart .equity-hover-marker { fill: var(--curve-color); stroke: #f2f4f6; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.equity-chart .equity-hover-tooltip { fill: #171b1f; stroke: #69747d; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.equity-chart .equity-hover-tooltip-title { fill: #f1f3f5; font-size: 10px; font-weight: 650; }
+.equity-chart .equity-hover-tooltip-text { fill: #d3d9de; font-size: 10px; }
+.equity-chart-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 8px 0 0 88px; }
 .equity-chart-legend span { display: inline-flex; align-items: center; gap: 6px; color: #aab3bb; font-size: .7rem; }
 .equity-chart-legend i { width: 9px; height: 9px; border-radius: 50%; background: var(--curve-color); }
 .backtest-scenario-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; color: #8b959d; font-size: .72rem; }
@@ -370,6 +408,7 @@ code { color: #b8d8fa; }
 .bottom-bar button { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 6px; padding: 8px 11px; color: #879099; background: transparent; font-size: .78rem; }
 .bottom-bar button:hover, .bottom-bar button.is-active { color: #e7edf2; background: #24272b; }
 @media (max-width: 640px) { .main-content { padding: 48px 24px 88px; } .main-content.sidebar-is-open { margin-left: 0; } .path-dialog { padding: 20px; } .config-section, .backtest-results { padding: 12px; } .config-section-heading, .engine-notice { align-items: flex-start; flex-direction: column; } .compile-actions { justify-content: stretch; } .compile-actions button { flex: 1 1 auto; } .main-content.is-more-page { padding-bottom: 14px; } .more-view { min-height: calc(100vh - 119px); } .yahoo-download-actions { align-items: flex-start; flex-direction: column; } .yahoo-download-actions > button { width: 100%; } .file-editor-actions { flex-wrap: wrap; } .file-editor-actions > span { flex: 1 1 100%; } }
+@media (max-width: 640px) { .backtest-buckets-toolbar { align-items: flex-start; flex-direction: column; } .backtest-buckets-toolbar-actions { width: 100%; justify-content: flex-end; } }
 
 body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] { color: #22272c; background: #f5f6f8; }
@@ -471,6 +510,12 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .secondary-button:hover { color: #1f252a; background: #edf0f2; }
 .app-shell[data-theme="light"] .path-dialog h2 { color: #20262b; }
 .app-shell[data-theme="light"] .path-dialog > p { color: #56616a; }
+.app-shell[data-theme="light"] .workspace-preview-content { border-color: #d4dbe0; background: #fff; }
+.app-shell[data-theme="light"] .workspace-preview-code-wrap { color: #26323a; background: #fff; }
+.app-shell[data-theme="light"] .workspace-preview-line-numbers { border-color: #e0e5e8; color: #75818a; background: #f1f3f5; }
+.app-shell[data-theme="light"] .workspace-preview-path code,
+.app-shell[data-theme="light"] .workspace-preview-format,
+.app-shell[data-theme="light"] .file-preview-loading { color: #68737c; }
 .app-shell[data-theme="light"] .item-dialog form > p { color: #56616a; }
 .app-shell[data-theme="light"] .builder-dialog-option,
 .app-shell[data-theme="light"] .compile-strategy-option { border-color: #d6dbe0; color: #273038; background: #f7f8f9; }
@@ -498,6 +543,14 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .equity-chart text,
 .app-shell[data-theme="light"] .equity-chart-legend span { fill: #68737c; color: #68737c; }
 .app-shell[data-theme="light"] .equity-chart line { stroke: #dce1e5; }
+.app-shell[data-theme="light"] .equity-chart line.equity-zero-line { stroke: #8a959e; }
+.app-shell[data-theme="light"] .drawdown-chart-panel { border-color: #e0e4e8; }
+.app-shell[data-theme="light"] .equity-chart-panel-label { color: #59656e; }
+.app-shell[data-theme="light"] .equity-chart .equity-hover-crosshair { stroke: #49545c; }
+.app-shell[data-theme="light"] .equity-chart .equity-hover-marker { stroke: #fff; }
+.app-shell[data-theme="light"] .equity-chart .equity-hover-tooltip { fill: #fff; stroke: #7f8a92; }
+.app-shell[data-theme="light"] .equity-chart .equity-hover-tooltip-title { fill: #202a31; }
+.app-shell[data-theme="light"] .equity-chart .equity-hover-tooltip-text { fill: #36434c; }
 .app-shell[data-theme="light"] .backtest-scenario-tabs { color: #68737c; }
 .app-shell[data-theme="light"] .backtest-scenario-tabs button { border-color: #cbd2d8; color: #56616a; background: #fff; }
 .app-shell[data-theme="light"] .backtest-scenario-tabs button.is-active { border-color: #86b6da; color: #285c83; background: #edf6fc; }
@@ -560,6 +613,7 @@ body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
 .app-shell[data-theme="light"] .bucket-result-card { border-color: #d8dde2; background: #fff; }
 .app-shell[data-theme="light"] .feed-subscription-option,
 .app-shell[data-theme="light"] .bucket-result-details strong { color: #35414a; }
+.app-shell[data-theme="light"] .bucket-contribution-note { color: #6d7982; }
 .app-shell[data-theme="light"] .feed-setting select { border-color: #cbd2d8; color: #293138; background: #fff; }
 .app-shell[data-theme="light"] .bucket-sidebar-select.is-selected { border-color: #86b6da; color: #285c83; background: #edf6fc; }
 .app-shell[data-theme="light"] .orders-table th,
