@@ -19,6 +19,9 @@
 struct BacktestResults {
     std::vector<double> equity_curve;
     std::vector<long long> equity_timestamps;
+    // Strategy-attributed P&L, used for per-strategy diagnostics when capital is shared.
+    std::vector<double> contribution_curve;
+    std::vector<long long> contribution_timestamps;
     std::vector<OrderEvent> hlog;
     struct IndicatorTrace {
         std::string name;
@@ -254,6 +257,7 @@ public:
             BacktestResults results;
         };
         std::vector<StrategyState> states(bucket.strategies.size());
+        std::vector<double> strategy_initial_capital(bucket.strategies.size(), 0.0);
         double shared_cash = config_.capital_allocation == CAPITAL_ALLOCATION_MODE::SHARED
             ? config_.initial_capital
             : 0.0;
@@ -280,6 +284,7 @@ public:
             states[strategy_index].cash = config_.capital_allocation == CAPITAL_ALLOCATION_MODE::EQUAL_PER_STRATEGY
                 ? config_.initial_capital / static_cast<double>(bucket.strategies.size())
                 : 0.0;
+            strategy_initial_capital[strategy_index] = states[strategy_index].cash;
             states[strategy_index].attribution_cash = states[strategy_index].cash;
             const auto attribution_bucket_id = binding.bucket_id.empty() ? bucket.id : binding.bucket_id;
             const auto [attribution_it, inserted] = attribution_bucket_indices.emplace(attribution_bucket_id, attribution_bucket_ids.size());
@@ -492,6 +497,8 @@ public:
                     }
                 }
                 bucket_contributions[attribution_index] += strategy_contribution;
+                states[strategy_index].results.contribution_timestamps.push_back(timestamp);
+                states[strategy_index].results.contribution_curve.push_back(strategy_contribution - strategy_initial_capital[strategy_index]);
             }
             for (std::size_t i = 0; i < bucket_results.bucket_attributions.size(); ++i) {
                 auto& attribution = bucket_results.bucket_attributions[i];

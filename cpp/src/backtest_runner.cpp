@@ -291,6 +291,14 @@ void print_results(const BacktestRunResults& results, std::size_t input_rows, co
             std::cout << "{\"instanceId\":\"" << json_escape(strategy.instance_id)
                       << "\",\"engineId\":" << strategy.strategy_id << ",\"equityCurve\":";
             print_equity_curve(strategy.results.equity_curve);
+            std::cout << ",\"contributionCurve\":";
+            print_equity_curve(strategy.results.contribution_curve);
+            std::cout << ",\"contributionTimestamps\":[";
+            for (std::size_t timestamp_index = 0; timestamp_index < strategy.results.contribution_timestamps.size(); ++timestamp_index) {
+                if (timestamp_index) std::cout << ',';
+                std::cout << strategy.results.contribution_timestamps[timestamp_index];
+            }
+            std::cout << ']';
             std::cout << ",\"orders\":";
             print_orders(strategy.results.hlog, rates);
             std::cout << ",\"indicators\":[";

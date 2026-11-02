@@ -909,19 +909,16 @@ function TradeVisualizer({ seriesOptions, onClose, focusedTrade }) {
   </section>
 }
 
-function bucketCorrelationData(scenario, frequency) {
-  const buckets = scenario.buckets || []
-  const sharedCapital = scenario.bucketCapitalMode !== 'INDEPENDENT'
-  const startingCapital = scenario.metrics?.initialEquity || 0
+function correlationSeriesData(sources, frequency, { sharedCapital, startingCapital, strategyMode = false }) {
   const interval = frequency === 'hourly' ? 3_600_000 : 86_400_000
-  const periods = [...new Set(buckets.flatMap((bucket) => {
-    const timestamps = sharedCapital ? bucket.contributionTimestamps : bucket.equityTimestamps
+  const periods = [...new Set(sources.flatMap((source) => {
+    const timestamps = source.timestamps
     return (timestamps || []).map((timestamp) => Math.floor(timestamp / interval))
   }))].sort((left, right) => left - right)
-  const series = buckets.map((bucket) => {
-    const initial = sharedCapital ? 0 : (bucket.metrics?.initialEquity || 0)
-    const timestamps = sharedCapital ? (bucket.contributionTimestamps || []) : (bucket.equityTimestamps || [])
-    const curve = sharedCapital ? (bucket.contributionCurve || []) : (bucket.equityCurve || [])
+  const series = sources.map((source) => {
+    const initial = source.initial
+    const timestamps = source.timestamps
+    const curve = source.curve
     const byPeriod = new Map()
     timestamps.forEach((timestamp, index) => byPeriod.set(Math.floor(timestamp / interval), curve[index] ?? initial))
     const activePeriods = [...byPeriod.keys()]
@@ -941,14 +938,14 @@ function bucketCorrelationData(scenario, frequency) {
         contributionChange: active ? change : null,
         drawdownPct: !sharedCapital && active && peak > 0 ? (current / peak - 1) * 100 : null,
         drawdownDollars: active ? current - peak : null,
-        returnPct: active && (sharedCapital ? startingCapital > 0 : previous > 0)
-          ? (change / (sharedCapital ? startingCapital : previous)) * 100
+        returnPct: active && (strategyMode || sharedCapital ? startingCapital > 0 : previous > 0)
+          ? (change / (strategyMode || sharedCapital ? startingCapital : previous)) * 100
           : null,
       }
       previous = current
       return point
     })
-    return { bucket, initial, values, returns: values.map((point) => point.returnPct), drawdowns: values.map((point) => sharedCapital ? point.drawdownDollars : point.drawdownPct) }
+    return { id: source.id, label: source.label, initial, values, returns: values.map((point) => point.returnPct), drawdowns: values.map((point) => sharedCapital || strategyMode ? point.drawdownDollars : point.drawdownPct) }
   })
   const correlation = (left, right) => {
     if (left.length < 2 || left.length !== right.length) return null
@@ -968,7 +965,30 @@ function bucketCorrelationData(scenario, frequency) {
     }
     return leftVariance > 0 && rightVariance > 0 ? covariance / Math.sqrt(leftVariance * rightVariance) : null
   }
-  return { periods, series, correlation, sharedCapital }
+  return { periods, series, correlation, sharedCapital, strategyMode }
+}
+
+function bucketCorrelationData(scenario, frequency) {
+  const buckets = scenario.buckets || []
+  const sharedCapital = scenario.bucketCapitalMode !== 'INDEPENDENT'
+  return correlationSeriesData(buckets.map((bucket) => ({
+    id: bucket.id,
+    label: bucket.id,
+    initial: sharedCapital ? 0 : (bucket.metrics?.initialEquity || 0),
+    timestamps: sharedCapital ? (bucket.contributionTimestamps || []) : (bucket.equityTimestamps || []),
+    curve: sharedCapital ? (bucket.contributionCurve || []) : (bucket.equityCurve || []),
+  })), frequency, { sharedCapital, startingCapital: scenario.metrics?.initialEquity || 0 })
+}
+
+function strategyCorrelationData(scenario, bucket, frequency) {
+  const strategies = bucket.strategies || []
+  return correlationSeriesData(strategies.map((strategy) => ({
+    id: strategy.instanceId,
+    label: strategy.strategyTag || `${strategy.name || 'Strategy'}#${strategy.instanceId}`,
+    initial: 0,
+    timestamps: strategy.contributionTimestamps || [],
+    curve: strategy.contributionCurve || [],
+  })), frequency, { sharedCapital: true, startingCapital: scenario.metrics?.initialEquity || 0, strategyMode: true })
 }
 
 function correlationCellStyle(value) {
@@ -982,14 +1002,18 @@ function correlationCellStyle(value) {
 }
 
 function BucketCorrelationMatrix({ scenario, frequency, onFrequencyChange }) {
-  const data = bucketCorrelationData(scenario, frequency)
-  const renderMatrix = (title, valuesKey) => <section className="bucket-correlation-section"><h4>{title}</h4><div className="bucket-correlation-table-wrap"><table className="bucket-correlation-table"><thead><tr><th></th>{data.series.map(({ bucket }) => <th key={bucket.id}>{bucket.id}</th>)}</tr></thead><tbody>{data.series.map((row, rowIndex) => <tr key={row.bucket.id}><th>{row.bucket.id}</th>{data.series.map((column, columnIndex) => { if (columnIndex >= rowIndex) return <td aria-hidden="true" className="correlation-empty-cell" key={column.bucket.id} />; const value = data.correlation(row[valuesKey], column[valuesKey]); return <td key={column.bucket.id} style={correlationCellStyle(value)}>{Number.isFinite(value) ? value.toFixed(2) : '—'}</td> })}</tr>)}</tbody></table></div></section>
+  const buckets = scenario.buckets || []
+  const bucketData = bucketCorrelationData(scenario, frequency)
+  const strategyDataByBucket = buckets.map((bucket) => ({ bucket, data: strategyCorrelationData(scenario, bucket, frequency) }))
+  const renderMatrix = (data, title, valuesKey) => <section className="bucket-correlation-section"><h4>{title}</h4><div className="bucket-correlation-table-wrap"><table className="bucket-correlation-table"><thead><tr><th></th>{data.series.map((series) => <th key={series.id}>{series.label}</th>)}</tr></thead><tbody>{data.series.map((row, rowIndex) => <tr key={row.id}><th>{row.label}</th>{data.series.map((column, columnIndex) => { if (columnIndex >= rowIndex) return <td aria-hidden="true" className="correlation-empty-cell" key={column.id} />; const value = data.correlation(row[valuesKey], column[valuesKey]); return <td key={column.id} style={correlationCellStyle(value)}>{Number.isFinite(value) ? value.toFixed(2) : '—'}</td> })}</tr>)}</tbody></table></div></section>
   return <div className="bucket-correlation-view">
-    <div className="bucket-correlation-heading"><div><h3>Bucket correlation · {scenario.scenarioLabel}</h3><p>{data.sharedCapital ? 'Shared-capital bucket contributions, normalized by total starting capital. Drawdown is measured in currency from each contribution series’ prior peak; these are attribution series, not standalone account returns.' : 'Standalone bucket returns and drawdown are sampled at each UTC interval close; missing intervals carry the last equity forward.'}</p></div><label>Aggregation<select onChange={(event) => onFrequencyChange(event.target.value)} value={frequency}><option value="daily">Daily</option><option value="hourly">Hourly</option></select></label></div>
-    {!data.series.length || data.periods.length < 2 ? <p className="input-help">Not enough bucket equity history to calculate correlations.</p> : <>
-      {renderMatrix(data.sharedCapital ? 'Bucket contribution return correlation' : 'Equity return correlation', 'returns')}
-      {renderMatrix(data.sharedCapital ? 'Bucket contribution drawdown ($) correlation' : 'Drawdown level correlation', 'drawdowns')}
-    </>}
+    <div className="bucket-correlation-heading"><div><h3>Correlation · {scenario.scenarioLabel}</h3><p>All series are aligned to the same daily or hourly UTC intervals. Strategy curves show attributed P&amp;L contributions, including when strategies share capital.</p></div><label>Aggregation<select onChange={(event) => onFrequencyChange(event.target.value)} value={frequency}><option value="daily">Daily</option><option value="hourly">Hourly</option></select></label></div>
+    {buckets.length > 1 && (bucketData.series.length < 2 || bucketData.periods.length < 2
+      ? <p className="input-help">Not enough bucket history to calculate bucket correlations.</p>
+      : <div className="correlation-matrix-pair">{renderMatrix(bucketData, bucketData.sharedCapital ? 'Bucket contribution return correlation' : 'Bucket equity return correlation', 'returns')}{renderMatrix(bucketData, bucketData.sharedCapital ? 'Bucket contribution drawdown ($) correlation' : 'Bucket drawdown level correlation', 'drawdowns')}</div>)}
+    {strategyDataByBucket.map(({ bucket, data }) => <section className="bucket-correlation-section" key={bucket.id}><h3>{buckets.length > 1 ? `${bucket.id} · strategy correlation` : 'Strategy correlation'}</h3>
+      {data.series.length < 2 || data.periods.length < 2 ? <p className="input-help">Not enough strategy history in {bucket.id} to calculate strategy correlations.</p> : <div className="correlation-matrix-pair">{renderMatrix(data, 'Strategy return correlation', 'returns')}{renderMatrix(data, 'Strategy contribution drawdown ($) correlation', 'drawdowns')}</div>}
+    </section>)}
   </div>
 }
 
@@ -1081,15 +1105,37 @@ function BucketBenchmarkRegression({ scenarios, benchmarkFiles, frequency }) {
     return scenarios.map((scenario) => {
       const shared = scenario.bucketCapitalMode !== 'INDEPENDENT'
       const rows = [{ label: 'Total portfolio', response: equityResponsePoints(scenario), contributionBase: null }]
-      for (const bucket of scenario.buckets || []) {
-        const timestamps = shared ? (bucket.contributionTimestamps || []) : (bucket.equityTimestamps || [])
-        const curve = shared ? (bucket.contributionCurve || []) : (bucket.equityCurve || [])
-        const response = timestamps.flatMap((timestamp, index) => Number.isFinite(curve[index]) ? [{ timestamp, value: curve[index] }] : [])
-        rows.push({ label: shared ? `${bucket.id} contribution` : bucket.id, response, contributionBase: shared ? scenario.metrics?.initialEquity : null })
+      const hasSingleBucket = (scenario.buckets || []).length === 1
+      if (hasSingleBucket) {
+        for (const strategy of scenario.buckets[0].strategies || []) {
+          const timestamps = strategy.contributionTimestamps || []
+          const curve = strategy.contributionCurve || []
+          const response = timestamps.flatMap((timestamp, index) => Number.isFinite(curve[index]) ? [{ timestamp, value: curve[index] }] : [])
+          rows.push({ label: `${strategy.strategyTag || `${strategy.name || 'Strategy'}#${strategy.instanceId}`} contribution`, response, contributionBase: scenario.metrics?.initialEquity })
+        }
+      } else {
+        for (const bucket of scenario.buckets || []) {
+          const timestamps = shared ? (bucket.contributionTimestamps || []) : (bucket.equityTimestamps || [])
+          const curve = shared ? (bucket.contributionCurve || []) : (bucket.equityCurve || [])
+          const response = timestamps.flatMap((timestamp, index) => Number.isFinite(curve[index]) ? [{ timestamp, value: curve[index] }] : [])
+          rows.push({ label: shared ? `${bucket.id} contribution` : bucket.id, response, contributionBase: shared ? scenario.metrics?.initialEquity : null })
+        }
       }
+      const calculatedRows = rows.map((row) => ({ ...row, ...regressionForReference(activeReference.points, row.response, frequency, row.contributionBase) }))
+      const strategies = hasSingleBucket ? (scenario.buckets[0].strategies || []) : []
+      const correlationRows = hasSingleBucket
+        ? [calculatedRows[0], ...strategies.map((strategy) => {
+          const timestamps = strategy.contributionTimestamps || []
+          const curve = strategy.contributionCurve || []
+          const response = timestamps.flatMap((timestamp, index) => Number.isFinite(curve[index]) ? [{ timestamp, value: curve[index] }] : [])
+          const label = strategy.strategyTag || `${strategy.name || 'Strategy'}#${strategy.instanceId}`
+          return { label, response, ...regressionForReference(activeReference.points, response, frequency, scenario.metrics?.initialEquity) }
+        })]
+        : calculatedRows
       return {
         scenario,
-        rows: rows.map((row) => ({ ...row, ...regressionForReference(activeReference.points, row.response, frequency, row.contributionBase) })),
+        rows: calculatedRows,
+        correlationRows,
       }
     })
   }, [activeReference, scenarios, frequency, tooCoarseForHourly])
@@ -1097,16 +1143,16 @@ function BucketBenchmarkRegression({ scenarios, benchmarkFiles, frequency }) {
   return <>
     {activeReference && !loading && !error && !tooCoarseForHourly && <section className="bucket-correlation-section benchmark-correlation-section">
       <h3>Benchmark return correlation · {frequency}</h3>
-      {regressions.map(({ scenario, rows }) => <div className="benchmark-regression-scenario" key={scenario.scenarioId}>
+      {regressions.map(({ scenario, correlationRows }) => <div className="benchmark-regression-scenario" key={scenario.scenarioId}>
         <h4>{scenario.scenarioLabel}</h4>
         <div className="bucket-correlation-table-wrap"><table className="bucket-correlation-table">
-          <thead><tr><th>Benchmark</th>{rows.map((row) => <th key={row.label}>{row.label}</th>)}</tr></thead>
-          <tbody><tr><th>{benchmarkFiles.find((file) => file.path === effectivePath)?.label || effectivePath}</th>{rows.map((row) => <td key={row.label} style={correlationCellStyle(row.correlation)}>{Number.isFinite(row.correlation) ? row.correlation.toFixed(2) : '—'}</td>)}</tr></tbody>
+          <thead><tr><th>Benchmark</th>{correlationRows.map((row) => <th key={row.label}>{row.label}</th>)}</tr></thead>
+          <tbody><tr><th>{benchmarkFiles.find((file) => file.path === effectivePath)?.label || effectivePath}</th>{correlationRows.map((row) => <td key={row.label} style={correlationCellStyle(row.correlation)}>{Number.isFinite(row.correlation) ? row.correlation.toFixed(2) : '—'}</td>)}</tr></tbody>
         </table></div>
       </div>)}
     </section>}
     <section className="benchmark-regression-section">
-    <div className="bucket-correlation-heading"><div><h3>Regression against reference dataset</h3><p>Reference returns are the regressor (x); each bucket and the total portfolio are response series (y). Benchmark prices are sampled to {frequency} UTC closes before returns are calculated.</p></div></div>
+    <div className="bucket-correlation-heading"><div><h3>Regression against reference dataset</h3><p>Reference returns are the regressor (x); portfolio, strategy, or bucket returns are response series (y). Benchmark prices are sampled to {frequency} UTC closes before returns are calculated.</p></div></div>
     <div className="benchmark-regression-controls">
       <label>Reference dataset<select onChange={(event) => { setUserPickedDataset(true); setSelectedPath(event.target.value) }} value={effectivePath}>{benchmarkFiles.map((file) => <option key={file.path} value={file.path}>{file.label}</option>)}</select></label>
       <label>Numeric timestamp<select onChange={(event) => setTsUnit(event.target.value)} value={tsUnit}><option>SECONDS</option><option>MILLISECONDS</option><option>MICROSECONDS</option><option>NANOSECONDS</option></select></label>
@@ -1117,7 +1163,7 @@ function BucketBenchmarkRegression({ scenarios, benchmarkFiles, frequency }) {
     {effectivePath && error && <p className="form-error">{error}</p>}
     {tooCoarseForHourly && <p className="form-error">This reference dataset is too coarse for hourly regression. Choose an hourly or finer price series.</p>}
     {activeReference && !loading && !error && !tooCoarseForHourly && <>
-      <p className="input-help">Using {activeReference.priceColumn} · {activeReference.currency} · {activeReference.points.length.toLocaleString()} prices. Regressions use only matching interval closes. A currency mismatch with the portfolio is not FX-adjusted.</p>
+      <p className="input-help">Using {activeReference.priceColumn} · {activeReference.currency} · {activeReference.points.length.toLocaleString()} prices. Regressions use only matching interval closes. Strategy and shared-bucket contribution rows use P&amp;L changes divided by starting portfolio capital; total portfolio uses equity returns, so their coefficients can differ. A currency mismatch with the portfolio is not FX-adjusted.</p>
       {regressions.map(({ scenario, rows }) => <section className="benchmark-regression-scenario" key={scenario.scenarioId}><h4>{scenario.scenarioLabel}</h4><div className="orders-table-wrap"><table className="orders-table bucket-regression-table"><thead><tr><th>Response series</th><th>Alpha / {frequency} interval</th><th>Beta</th><th>R²</th><th>Observations</th><th>Matched range</th></tr></thead><tbody>{rows.map((row) => {
         const start = Number.isFinite(row.firstPeriod) ? new Date(row.firstPeriod * interval).toLocaleDateString() : '—'
         const end = Number.isFinite(row.lastPeriod) ? new Date(row.lastPeriod * interval).toLocaleDateString() : '—'
@@ -1126,6 +1172,84 @@ function BucketBenchmarkRegression({ scenarios, benchmarkFiles, frequency }) {
     </>}
     </section>
   </>
+}
+
+function BucketAssetCorrelationTables({ scenarios, frequency }) {
+  const requests = useMemo(() => {
+    const unique = new Map()
+    for (const scenario of scenarios) {
+      for (const bucket of scenario.buckets || []) {
+        for (const feed of bucket.feeds || []) {
+          const key = `${feed.path}|${feed.tsUnit || 'MILLISECONDS'}|${feed.dateFormat || 'DDMMYYYY'}`
+          if (!unique.has(key)) unique.set(key, { key, ...feed })
+        }
+      }
+    }
+    return [...unique.values()]
+  }, [scenarios])
+  const [references, setReferences] = useState({})
+  const [errors, setErrors] = useState({})
+  const loading = requests.some((feed) => !references[feed.key] && !errors[feed.key])
+
+  useEffect(() => {
+    if (!requests.length) return undefined
+    const controller = new AbortController()
+    const loadAssetReferences = async () => {
+      const results = await Promise.all(requests.map(async (feed) => {
+        try {
+          const query = new URLSearchParams({ path: feed.path, tsUnit: feed.tsUnit || 'MILLISECONDS', dateFormat: feed.dateFormat || 'DDMMYYYY' })
+          const response = await fetch(`/api/backtests/reference-series?${query}`, { signal: controller.signal })
+          const result = await readApiJson(response, 'asset correlation data')
+          if (!response.ok) throw new Error(result.error || 'Could not read this asset dataset.')
+          return { key: feed.key, result }
+        } catch (error) {
+          if (error.name === 'AbortError') return null
+          return { key: feed.key, error: error.message }
+        }
+      }))
+      if (controller.signal.aborted) return
+      setReferences((current) => ({ ...current, ...Object.fromEntries(results.filter((item) => item?.result).map(({ key, result }) => [key, result])) }))
+      setErrors((current) => ({ ...current, ...Object.fromEntries(results.filter((item) => item?.error).map(({ key, error }) => [key, error])) }))
+    }
+    loadAssetReferences()
+    return () => controller.abort()
+  }, [requests])
+
+  if (!requests.length) return null
+  return <section className="benchmark-regression-section bucket-asset-correlation-section">
+    <div className="bucket-correlation-heading"><div><h3>Asset return correlation · {frequency}</h3><p>Each dataset is correlated with the portfolio and the strategies connected to it. Price returns use matched UTC interval closes.</p></div></div>
+    {loading && <p className="input-help">Loading the bucket asset datasets…</p>}
+    {scenarios.map((scenario) => <section className="benchmark-regression-scenario" key={scenario.scenarioId}>
+      <h4>{scenario.scenarioLabel}</h4>
+      {(scenario.buckets || []).map((bucket) => <section className="bucket-correlation-section" key={bucket.id}>
+        <h4>{bucket.id}</h4>
+        {(bucket.feeds || []).map((feed) => {
+          const key = `${feed.path}|${feed.tsUnit || 'MILLISECONDS'}|${feed.dateFormat || 'DDMMYYYY'}`
+          const reference = references[key]
+          const connectedStrategies = (bucket.strategies || []).filter((strategy) => !Array.isArray(strategy.feedIds) || strategy.feedIds.includes(feed.id))
+          const responses = [{ label: 'Total portfolio', points: equityResponsePoints(scenario), contributionBase: null }, ...connectedStrategies.map((strategy) => ({
+            label: strategy.strategyTag || `${strategy.name || 'Strategy'}#${strategy.instanceId}`,
+            points: (strategy.contributionTimestamps || []).flatMap((timestamp, index) => Number.isFinite(strategy.contributionCurve?.[index]) ? [{ timestamp, value: strategy.contributionCurve[index] }] : []),
+            contributionBase: scenario.metrics?.initialEquity,
+          }))]
+          const correlations = reference ? responses.map((response) => ({
+            label: response.label,
+            value: regressionForReference(reference.points, response.points, frequency, response.contributionBase).correlation,
+          })) : []
+          return <div className="benchmark-regression-scenario" key={key}>
+            <h4>{feed.name || feed.path}</h4>
+            {errors[key] && <p className="form-error">{errors[key]}</p>}
+            {reference && <div className="bucket-correlation-table-wrap"><table className="bucket-correlation-table">
+              <thead><tr><th>Asset</th>{correlations.map((item) => <th key={item.label}>{item.label}</th>)}</tr></thead>
+              <tbody><tr><th>{feed.path}</th>{correlations.map((item) => <td key={item.label} style={correlationCellStyle(item.value)}>{Number.isFinite(item.value) ? item.value.toFixed(2) : '—'}</td>)}</tr></tbody>
+            </table></div>}
+            {!loading && !reference && !errors[key] && <p className="input-help">No asset price history available for this feed.</p>}
+          </div>
+        })}
+      </section>)}
+    </section>)}
+    <small className="input-help">Asset returns use the dataset’s native prices; this correlation view does not convert asset or portfolio currency.</small>
+  </section>
 }
 
 function BucketPerformanceView({ scenarios, currency }) {
@@ -1155,16 +1279,16 @@ function BacktestReport({ scenarios, compare, benchmarkFiles }) {
     ? [['portfolio', 'Portfolio'], ['buckets', 'Buckets'], ['correlation', 'Correlation']]
     : [['portfolio', 'Portfolio'], ['correlation', 'Correlation']]
   const activePerformanceView = performanceViews.some(([id]) => id === performanceView) ? performanceView : 'portfolio'
-  const indicatorColors = ['#a887ff', '#57b8ed', '#f1b654', '#ef7fab', '#52d1c3', '#a5c96b']
+  const indicatorColors = ['#a887ff', '#57b8ed', '#f1b654', '#ef7fab', '#52d1c3', '#a5c96b', '#ff8066', '#6f91ff', '#d47ce5', '#36b978', '#e6c84f', '#43c3c9']
   const tradeSeriesOptions = (detailScenario.buckets || []).flatMap((bucket) => (bucket.feeds || []).map((feed) => {
     const trades = (detailScenario.trades || []).filter((trade) => trade.bucketId === bucket.id && trade.feedId === feed.id)
-    const indicators = (bucket.strategies || []).flatMap((strategy) => (strategy.indicators || []).filter((indicator) => indicator.feedId === feed.id).map((indicator, index) => ({
+    const indicators = (bucket.strategies || []).flatMap((strategy) => (strategy.indicators || []).filter((indicator) => indicator.feedId === feed.id).map((indicator) => ({ strategy, indicator }))).map(({ strategy, indicator }, index) => ({
       key: `${bucket.id}:${strategy.instanceId}:${indicator.name}:${index}`,
       preferenceKey: `${strategy.strategyId || strategy.name}:${indicator.name}:${index}`,
-      label: `${strategy.name} · ${indicator.name}`,
+      label: `${indicator.strategyTag || strategy.strategyTag || `${strategy.name}#${strategy.instanceId}`} · ${indicator.name}`,
       color: indicatorColors[index % indicatorColors.length],
       points: indicator.points || [],
-    })))
+    }))
     return { key: `${bucket.id}:${feed.id}`, label: `${feed.name} · ${bucket.id}`, feed, trades, indicators }
   })).filter((series) => series.trades.length > 0 || series.indicators.length > 0)
   const tabs = [
@@ -1223,7 +1347,7 @@ function BacktestReport({ scenarios, compare, benchmarkFiles }) {
         </nav>
         {activePerformanceView === 'portfolio' && <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div>}
         {hasIndependentBuckets && activePerformanceView === 'buckets' && <BucketPerformanceView currency={currency} scenarios={scenarios} />}
-        {activePerformanceView === 'correlation' && <div className="bucket-correlation-scenarios">{scenarios.map((scenario) => <BucketCorrelationMatrix frequency={correlationFrequency} key={scenario.scenarioId} onFrequencyChange={setCorrelationFrequency} scenario={scenario} />)}<BucketBenchmarkRegression frequency={correlationFrequency} scenarios={scenarios} benchmarkFiles={benchmarkFiles} /></div>}
+        {activePerformanceView === 'correlation' && <div className="bucket-correlation-scenarios">{scenarios.map((scenario) => <BucketCorrelationMatrix frequency={correlationFrequency} key={scenario.scenarioId} onFrequencyChange={setCorrelationFrequency} scenario={scenario} />)}<BucketAssetCorrelationTables frequency={correlationFrequency} scenarios={scenarios} /><BucketBenchmarkRegression frequency={correlationFrequency} scenarios={scenarios} benchmarkFiles={benchmarkFiles} /></div>}
       </>}
       {activeTab === 'trades' && visualizeSeries ? <TradeVisualizer key={`${detailScenario.scenarioId}:${visualizeSeries.bucketId || 'all'}:${visualizeSeries.instanceId || 'all'}`} focusedTrade={visualizeSeries === true ? null : visualizeSeries} onClose={() => setVisualizeSeries(false)} seriesOptions={tradeSeriesOptions} /> : activeTab === 'trades' && <>
         {tradeSeriesOptions.length > 0 && <div className="trade-series-actions"><span>{detailScenario.trades.length.toLocaleString()} completed trades across {tradeSeriesOptions.length.toLocaleString()} data series</span><button className="trade-visualize-button" onClick={() => setVisualizeSeries(true)} type="button">Visualize series</button></div>}

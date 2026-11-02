@@ -1235,7 +1235,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(item, bool):
                         item = str(item).lower()
                     arguments.append(f"{key}={item}")
-                prepared_strategies.append({"instanceId": instance_id, "strategyId": strategy_id, "name": strategy_meta["name"]})
+                prepared_strategies.append({"instanceId": instance_id, "strategyId": strategy_id, "name": strategy_meta["name"], "feedIds": connected_feeds})
             prepared_buckets.append({"id": bucket_id, "feeds": prepared_feeds, "strategies": prepared_strategies})
 
         scenario_specs = {
@@ -1281,10 +1281,12 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 metadata = strategy_metadata[strategy["instanceId"]]
                 strategy["strategyId"] = metadata["strategyId"]
                 strategy["name"] = metadata["name"]
+                strategy["feedIds"] = metadata["feedIds"]
                 strategy["strategyTag"] = f'{metadata["name"]}#{strategy.get("engineId", strategy["instanceId"])}'
                 for indicator in strategy.get("indicators", []):
                     indicator["instanceId"] = strategy["instanceId"]
                     indicator["strategyName"] = metadata["name"]
+                    indicator["strategyTag"] = strategy["strategyTag"]
                 for order in strategy.get("orders", []):
                     orders.append({**order, "bucketId": bucket["id"], "instanceId": strategy["instanceId"], "strategyId": strategy["strategyId"], "strategyName": strategy["name"], "strategyTag": strategy["strategyTag"]})
             bucket["metrics"] = {"orders": sum(len(strategy.get("orders", [])) for strategy in bucket.get("strategies", []))}
@@ -1909,7 +1911,13 @@ class ConfigHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The browser may cancel a large preview/reference request when the
+            # user changes views or selects another dataset. The disconnected
+            # client is normal; it should not produce a server traceback.
+            return
 
     def log_message(self, format: str, *args: Any) -> None:
         """Keep normal browser requests out of the terminal."""
