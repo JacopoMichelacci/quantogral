@@ -3,7 +3,7 @@
 body { margin: 0; min-width: 320px; min-height: 100vh; background: #0b0c0e; }
 button, input { font: inherit; }
 button { cursor: pointer; }
-.app-shell { min-height: 100vh; }
+.app-shell { min-height: 100vh; background-color: #0b0c0e; background-image: url('/math-pattern-dark.svg'); background-position: 18px 14px; background-repeat: repeat; background-size: 340px 227px; }
 .project-sidebar { position: fixed; z-index: 10; top: 0; bottom: 57px; left: 0; width: 256px; overflow: hidden; border-right: 1px solid #24272b; background: #111316; transition: width 180ms ease; }
 .project-sidebar.is-expanded { width: min(var(--sidebar-expanded-width, 256px), calc(100vw - 40px)); }
 .project-sidebar.is-resizing { transition: none; }
@@ -570,7 +570,7 @@ code { color: #b8d8fa; }
 @media (max-width: 640px) { .backtest-buckets-toolbar { align-items: flex-start; flex-direction: column; } .backtest-buckets-toolbar-actions { width: 100%; justify-content: flex-end; } .benchmark-regression-controls { grid-template-columns: 1fr; } }
 
 body[data-theme="light"] { color: #22272c; background: #f5f6f8; }
-.app-shell[data-theme="light"] { color: #22272c; background: #f5f6f8; }
+.app-shell[data-theme="light"] { color: #22272c; background-color: #f5f6f8; background-image: url('/math-pattern-light.svg'); }
 .app-shell[data-theme="light"] .project-sidebar,
 .app-shell[data-theme="light"] .bottom-bar { border-color: #d6dbe0; background: #fff; }
 .app-shell[data-theme="light"] .sidebar-header { border-color: #dfe3e7; }

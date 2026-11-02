@@ -2595,21 +2595,23 @@ function App() {
                 <button className="collapse-all-button" onClick={collapseExplorerToDefault} type="button">Collapse all</button>
               </div>
               {selectingDownloadFolder && <div className="destination-selection-banner"><span>Choose a destination folder</span><button onClick={() => setSelectingDownloadFolder(false)} type="button">Cancel</button></div>}
-              <div className="builder-row">
-                <button aria-expanded={builderExpanded} className="tree-item builder-item" onClick={toggleBuilder} type="button">
-                  <span className="tree-chevron">{builderExpanded ? '⌄' : '›'}</span>
-                  <FolderIcon />
-                  <span>Builder</span>
-                </button>
-                <button aria-label="Builder settings" className="builder-settings" onClick={openBuilderDialog} type="button">⚙</button>
-              </div>
-              {builderExpanded && (
-                <div className="tree-children">
-                  {builderTree.map((node) => (
-                    <TreeNode key={`Builder/${node.name}`} node={node} nodeKey={`Builder/${node.name}`} expandedNodes={expandedNodes} onToggle={toggleTreeNode} strategies={strategyCatalog} onSelectStrategy={applyStrategy} onOpenItemSettings={openItemSettings} selectingStrategies={selectingStrategies} compileSelection={compileSelection} onToggleCompileSelection={toggleCompileSelection} isCodeWorkspace={isBuilder} onOpenWorkspaceFile={requestOpenWorkspaceFile} />
-                  ))}
+              {(!isDataDownload && !isYahooFinance) && <>
+                <div className="builder-row">
+                  <button aria-expanded={builderExpanded} className="tree-item builder-item" onClick={toggleBuilder} type="button">
+                    <span className="tree-chevron">{builderExpanded ? '⌄' : '›'}</span>
+                    <FolderIcon />
+                    <span>Builder</span>
+                  </button>
+                  <button aria-label="Builder settings" className="builder-settings" onClick={openBuilderDialog} type="button">⚙</button>
                 </div>
-              )}
+                {builderExpanded && (
+                  <div className="tree-children">
+                    {builderTree.map((node) => (
+                      <TreeNode key={`Builder/${node.name}`} node={node} nodeKey={`Builder/${node.name}`} expandedNodes={expandedNodes} onToggle={toggleTreeNode} strategies={strategyCatalog} onSelectStrategy={applyStrategy} onOpenItemSettings={openItemSettings} selectingStrategies={selectingStrategies} compileSelection={compileSelection} onToggleCompileSelection={toggleCompileSelection} isCodeWorkspace={isBuilder} onOpenWorkspaceFile={requestOpenWorkspaceFile} />
+                    ))}
+                  </div>
+                )}
+              </>}
               <div className="tree-node">
                 <div className="tree-node-row">
                   <button aria-expanded={Boolean(expandedNodes.data)} className="tree-item directory-item root-data-item" onClick={() => toggleTreeNode('data')} type="button">
@@ -2791,10 +2793,7 @@ function App() {
           <section className="simple-backtest-view">
             <button aria-label="Back to Backtesting" className="back-link" onClick={() => navigateToPage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">BACKTESTING</div>
-            <div className="simple-backtest-title-row">
-              <h1>Simple Backtesting</h1>
-              <button aria-label="Backtest settings" className="backtest-settings-button" onClick={openSimpleBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button>
-            </div>
+            <h1>Simple Backtesting</h1>
             <BacktestSettingsPanel draft={simpleBacktestSettingsDraft} error={simpleBacktestSettingsError} onCancel={() => { setSimpleBacktestSettingsDraft(simpleBacktestConfig); setSimpleBacktestSettingsError(''); setSimpleBacktestSettingsOpen(false) }} onChange={updateSimpleBacktestSettingsDraft} onSave={saveSimpleBacktestSettings} onToggle={openSimpleBacktestSettings} open={simpleBacktestSettingsOpen} />
               <p className="page-description">Add strategies and market-data files from the project explorer, then configure each strategy.</p>
 
