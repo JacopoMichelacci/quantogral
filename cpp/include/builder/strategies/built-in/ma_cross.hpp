@@ -32,8 +32,25 @@ public:
         if (params.fast_len >= params.slow_len || params.fast_len < 1 || params.slow_len < 1) {
             throw std::invalid_argument("lengths must be positive. fast length must be < slow length");
         }
-        if (params.sizing.equity_pct <= 0.0 || params.sizing.equity_pct > 1.0) {
-            throw std::invalid_argument("MAC equity_pct must be in (0, 1]");
+        switch (params.sizing.mode) {
+            case SIZING_MODE::FIXED:
+                if (!(params.sizing.qty > 0.0)) {
+                    throw std::invalid_argument("MAC sizing.qty must be greater than zero.");
+                }
+                break;
+            case SIZING_MODE::FIXED_FRACTIONAL_PRICE:
+                if (params.sizing.equity_pct <= 0.0 || params.sizing.equity_pct > 1.0) {
+                    throw std::invalid_argument("MAC sizing.equity_pct must be in (0, 1].");
+                }
+                break;
+            case SIZING_MODE::FIXED_FRACTIONAL_SL:
+                if (params.sizing.equity_pct <= 0.0 || params.sizing.equity_pct > 1.0) {
+                    throw std::invalid_argument("MAC sizing.equity_pct must be in (0, 1].");
+                }
+                if (!(params.slnot > 0.0)) {
+                    throw std::invalid_argument("MAC fixed-fractional-SL sizing requires a positive slnot.");
+                }
+                break;
         }
     }
 
@@ -72,9 +89,6 @@ public:
             case SIZING_MODE::FIXED_FRACTIONAL_PRICE:
                 return ctx.fixed_fractional_price_qty(price, params.sizing.equity_pct);
             case SIZING_MODE::FIXED_FRACTIONAL_SL:
-                if (!(params.slnot > 0.0)) {
-                    throw std::invalid_argument("MAC fixed-fractional-SL sizing requires a positive slnot.");
-                }
                 return ctx.fixed_fractional_sl_qty(params.slnot, params.sizing.equity_pct);
             default:
                 throw std::invalid_argument("MAC unsupported sizing mode");

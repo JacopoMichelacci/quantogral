@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from quantogral.data.providers.yfinance import DataAlreadyExistsError, download_yahoo_history, search_yahoo_symbols
 
 DEFAULT_BUILDER_PATH = "./cpp/include/builder"
-DEFAULT_BACKTEST_SETTINGS = {
+DEFAULT_SIMPLE_BACKTEST_SETTINGS = {
     "initial_capital": 100000,
     "cost_bps": 0,
     "fill_latency_seconds": 0,
@@ -35,6 +35,7 @@ DEFAULT_BACKTEST_SETTINGS = {
     "base_currency": "USD",
     "ignore_currency": False,
 }
+DEFAULT_GRID_SEARCH_SETTINGS: dict[str, Any] = {}
 PROJECT_ROOT = Path(os.environ.get("QUANTOGRAL_ROOT", Path(__file__).resolve().parents[3]))
 CONFIG_PATH = PROJECT_ROOT / ".quantogral" / "config.json"
 DATASET_SETTINGS_PATH = PROJECT_ROOT / ".quantogral" / "dataset-settings.json"
@@ -259,7 +260,7 @@ def strategy_catalog_from_headers() -> list[dict[str, Any]]:
 
 
 def read_config() -> tuple[dict[str, Any], bool]:
-    """Return local workspace and backtest settings and whether Builder path is saved."""
+    """Return local workspace plus settings isolated by backtesting method."""
     raw_config: dict[str, Any] = {}
     try:
         with CONFIG_PATH.open(encoding="utf-8") as config_file:
@@ -276,27 +277,29 @@ def read_config() -> tuple[dict[str, Any], bool]:
     if not configured:
         builder_path = DEFAULT_BUILDER_PATH
 
-    saved_backtest = raw_config.get("backtest", {})
-    saved_backtest = saved_backtest if isinstance(saved_backtest, dict) else {}
-    backtest = dict(DEFAULT_BACKTEST_SETTINGS)
+    saved_simple = raw_config.get("simple_backtest", raw_config.get("backtest", {}))
+    saved_simple = saved_simple if isinstance(saved_simple, dict) else {}
+    simple_backtest = dict(DEFAULT_SIMPLE_BACKTEST_SETTINGS)
     for key in ("initial_capital", "cost_bps", "fill_latency_seconds"):
-        candidate = saved_backtest.get(key)
+        candidate = saved_simple.get(key)
         if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) and math.isfinite(candidate):
-            backtest[key] = candidate
-    if backtest["initial_capital"] <= 0 or backtest["cost_bps"] < 0 or backtest["fill_latency_seconds"] < 0:
-        backtest = dict(DEFAULT_BACKTEST_SETTINGS)
-    if saved_backtest.get("capital_allocation") in {"SHARED", "EQUAL_PER_STRATEGY"}:
-        backtest["capital_allocation"] = saved_backtest["capital_allocation"]
-    if saved_backtest.get("bucket_capital_mode") in {"SHARED", "INDEPENDENT"}:
-        backtest["bucket_capital_mode"] = saved_backtest["bucket_capital_mode"]
-    if saved_backtest.get("run_mode") in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
-        backtest["run_mode"] = saved_backtest["run_mode"]
-    base_currency = saved_backtest.get("base_currency")
+            simple_backtest[key] = candidate
+    if simple_backtest["initial_capital"] <= 0 or simple_backtest["cost_bps"] < 0 or simple_backtest["fill_latency_seconds"] < 0:
+        simple_backtest = dict(DEFAULT_SIMPLE_BACKTEST_SETTINGS)
+    if saved_simple.get("capital_allocation") in {"SHARED", "EQUAL_PER_STRATEGY"}:
+        simple_backtest["capital_allocation"] = saved_simple["capital_allocation"]
+    if saved_simple.get("bucket_capital_mode") in {"SHARED", "INDEPENDENT"}:
+        simple_backtest["bucket_capital_mode"] = saved_simple["bucket_capital_mode"]
+    if saved_simple.get("run_mode") in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
+        simple_backtest["run_mode"] = saved_simple["run_mode"]
+    base_currency = saved_simple.get("base_currency")
     if isinstance(base_currency, str) and re.fullmatch(r"[A-Z]{3}", base_currency):
-        backtest["base_currency"] = base_currency
-    if isinstance(saved_backtest.get("ignore_currency"), bool):
-        backtest["ignore_currency"] = saved_backtest["ignore_currency"]
-    return {"builder": {"path": builder_path}, "backtest": backtest}, configured
+        simple_backtest["base_currency"] = base_currency
+    if isinstance(saved_simple.get("ignore_currency"), bool):
+        simple_backtest["ignore_currency"] = saved_simple["ignore_currency"]
+    saved_grid_search = raw_config.get("grid_search", {})
+    grid_search = saved_grid_search if isinstance(saved_grid_search, dict) else dict(DEFAULT_GRID_SEARCH_SETTINGS)
+    return {"builder": {"path": builder_path}, "simple_backtest": simple_backtest, "grid_search": grid_search}, configured
 
 
 def read_local_json(path: Path) -> dict[str, Any]:
@@ -433,10 +436,10 @@ def write_config(builder_path: str) -> None:
     temporary_path.replace(CONFIG_PATH)
 
 
-def write_backtest_config(settings: dict[str, Any]) -> None:
-    """Persist backtest settings in the local workspace config file."""
+def write_backtest_config(settings: dict[str, Any], mode: str = "simple") -> None:
+    """Persist settings in the selected backtesting mode's own config namespace."""
     config, _ = read_config()
-    config["backtest"] = settings
+    config["simple_backtest" if mode == "simple" else "grid_search"] = settings
     CONFIG_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=CONFIG_PATH.parent, delete=False) as temporary_file:
         json.dump(config, temporary_file, indent=2)
@@ -1018,6 +1021,58 @@ def read_trade_chart(payload: dict[str, Any]) -> dict[str, Any]:
     return {"points": points, "totalPoints": len(points)}
 
 
+def read_benchmark_series(payload: dict[str, Any]) -> dict[str, Any]:
+    """Read a local CSV/Parquet price series for report-only benchmark regressions."""
+    relative_path = payload.get("path")
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        raise ValueError("Choose a reference dataset.")
+    source = safe_workspace_path(PROJECT_ROOT / "data", relative_path)
+    if not source.is_file() or source.suffix.lower() not in {".csv", ".parquet", ".pq"}:
+        raise ValueError("Choose an existing CSV or Parquet reference dataset.")
+    timezone_name = dataset_settings(source.relative_to(PROJECT_ROOT / "data").as_posix())["timezone"]
+    ts_unit = payload.get("tsUnit", "MILLISECONDS")
+    date_format = payload.get("dateFormat", "DDMMYYYY")
+    if ts_unit not in {"SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"} or date_format not in {"DDMMYYYY", "MMDDYYYY"}:
+        raise ValueError("Choose valid timestamp settings for the reference dataset.")
+    try:
+        import polars as pl
+    except ImportError as error:
+        raise RuntimeError("Reading reference data needs Polars. Run `uv sync` and restart Quantogral.") from error
+    try:
+        parquet = source.suffix.lower() in {".parquet", ".pq"}
+        frame = pl.read_parquet(source) if parquet else pl.read_csv(source, infer_schema_length=10000, try_parse_dates=True)
+        normalized = {"".join(character for character in column.lower() if character.isalnum()): column for column in frame.columns}
+        timestamp_column = next((normalized.get(name) for name in ("timestamp", "timestamps", "datetime", "date", "time", "ts", "epoch") if normalized.get(name)), None)
+        price_column = next((normalized.get(name) for name in ("adjclose", "adjustedclose", "close", "price", "value", "nav") if normalized.get(name)), None)
+        if timestamp_column is None or price_column is None:
+            if not parquet:
+                frame = pl.read_csv(source, has_header=False, infer_schema_length=10000, try_parse_dates=True)
+            if frame.width < 2:
+                raise ValueError("Reference data needs a timestamp column and a price column such as Adj Close or Close.")
+            timestamp_column, price_column = frame.columns[:2]
+        rows = frame.select([pl.col(timestamp_column).alias("timestamp"), pl.col(price_column).alias("price")]).rows()
+    except ValueError:
+        raise
+    except Exception as error:
+        raise ValueError(f"Could not read reference dataset {source.name}: {error}") from error
+    points = []
+    for row_number, (raw_timestamp, raw_price) in enumerate(rows, 1):
+        try:
+            timestamp = _market_timestamp_ms(raw_timestamp, timezone_name, ts_unit, date_format)
+            price = float(raw_price)
+            if not math.isfinite(price) or price <= 0:
+                raise ValueError("price must be a finite value greater than zero")
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"Invalid reference data at row {row_number}: {error}") from error
+        points.append({"timestamp": timestamp, "price": price})
+    points.sort(key=lambda point: point["timestamp"])
+    if len(points) < 2:
+        raise ValueError("Reference data needs at least two valid price observations.")
+    metadata = dataset_settings(source.relative_to(PROJECT_ROOT / "data").as_posix())
+    median_gap_ms = statistics.median(right["timestamp"] - left["timestamp"] for left, right in zip(points, points[1:]))
+    return {"path": relative_path, "priceColumn": price_column, "currency": metadata["currency"], "timezone": timezone_name, "medianGapMs": median_gap_ms, "points": points}
+
+
 def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     if not runner_is_current():
         raise RuntimeError("Compile the strategies from Builder settings before running a backtest.")
@@ -1157,8 +1212,14 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 if strategy_meta is None:
                     raise ValueError(f"Strategy {strategy_id} is not a supported OHLCV strategy.")
                 fields = {field["key"]: field for field in [*strategy_meta["baseConfig"], *strategy_meta["parameters"]]}
+                active_values = {}
                 for key, item in values.items():
                     field = fields.get(key)
+                    visibility = field.get("visibleWhen") if field else None
+                    if visibility and values.get(visibility["key"]) not in visibility["values"]:
+                        # Hidden conditional parameters fall back to their C++ defaults.
+                        # Do not parse stale or blank values for an inactive sizing mode.
+                        continue
                     if field and field["type"] == "number":
                         try:
                             number = float(item)
@@ -1166,8 +1227,9 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                             raise ValueError(f"Strategy {strategy_meta['name']} setting '{key}' must be a number.") from None
                         if not math.isfinite(number):
                             raise ValueError(f"Strategy {strategy_meta['name']} setting '{key}' must be a finite number.")
-                arguments.extend([instance_id, strategy_id, str(len(connected_feeds)), *connected_feeds, str(len(values))])
-                for key, item in values.items():
+                    active_values[key] = item
+                arguments.extend([instance_id, strategy_id, str(len(connected_feeds)), *connected_feeds, str(len(active_values))])
+                for key, item in active_values.items():
                     if not isinstance(key, str) or not key or "=" in key:
                         raise ValueError(f"Strategy instance {instance_id} has an invalid config field name.")
                     if isinstance(item, bool):
@@ -1534,6 +1596,19 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        if parsed_path.path == "/api/backtests/reference-series":
+            query = parse_qs(parsed_path.query)
+            payload = {key: values[0] for key, values in query.items() if values}
+            try:
+                self.send_json(read_benchmark_series(payload))
+            except WorkspaceItemError as error:
+                self.send_json({"error": str(error)}, error.status)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            except RuntimeError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
         if parsed_path.path == "/api/strategies/presets":
             strategy_id = parse_qs(parsed_path.query).get("strategyId", [""])[0]
             try:
@@ -1576,14 +1651,17 @@ class ConfigHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         config, builder_configured = read_config()
-        raw_backtest_configured = False
+        simple_backtest_configured = False
+        grid_search_configured = False
         try:
             with CONFIG_PATH.open(encoding="utf-8") as config_file:
                 stored_config = json.load(config_file)
-            raw_backtest_configured = isinstance(stored_config, dict) and isinstance(stored_config.get("backtest"), dict)
+            if isinstance(stored_config, dict):
+                simple_backtest_configured = isinstance(stored_config.get("simple_backtest"), dict) or isinstance(stored_config.get("backtest"), dict)
+                grid_search_configured = isinstance(stored_config.get("grid_search"), dict)
         except (json.JSONDecodeError, OSError):
             pass
-        self.send_json({**config, "builderConfigured": builder_configured, "backtestConfigured": raw_backtest_configured})
+        self.send_json({**config, "builderConfigured": builder_configured, "simpleBacktestConfigured": simple_backtest_configured, "gridSearchConfigured": grid_search_configured})
 
     def do_PUT(self) -> None:  # noqa: N802
         if self.path not in {"/api/config/builder", "/api/config/backtest", "/api/workspace/items", "/api/workspace/file", "/api/data/settings", "/api/strategies/presets"}:
@@ -1631,6 +1709,18 @@ class ConfigHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/config/backtest":
+            mode = payload.get("mode", "simple")
+            if mode == "gridsearch":
+                settings = payload.get("settings", {})
+                if not isinstance(settings, dict):
+                    self.send_json({"error": "GridSearch settings must be an object."}, HTTPStatus.BAD_REQUEST)
+                    return
+                write_backtest_config(settings, mode="gridsearch")
+                self.send_json({"grid_search": settings})
+                return
+            if mode != "simple":
+                self.send_json({"error": "Choose simple or gridsearch settings."}, HTTPStatus.BAD_REQUEST)
+                return
             settings = {}
             try:
                 for key in ("initial_capital", "cost_bps", "fill_latency_seconds"):
@@ -1658,8 +1748,8 @@ class ConfigHandler(BaseHTTPRequestHandler):
             except (KeyError, TypeError, ValueError) as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
                 return
-            write_backtest_config(settings)
-            self.send_json({"backtest": settings})
+            write_backtest_config(settings, mode="simple")
+            self.send_json({"simple_backtest": settings})
             return
 
         try:

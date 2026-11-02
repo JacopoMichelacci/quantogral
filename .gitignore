@@ -16,6 +16,13 @@ dist/
 # Local market data (keep the empty directory placeholder only)
 /data/*
 !/data/.gitkeep
+!/data/reference/
+!/data/reference/benchmarks/
+/data/reference/benchmarks/*
+!/data/reference/benchmarks/.gitkeep
+!/data/reference/fx/
+/data/reference/fx/*
+!/data/reference/fx/.gitkeep
 
 # Local workspace state (keep the empty directory placeholder only)
 /.quantogral/*

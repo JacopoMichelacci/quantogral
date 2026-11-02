@@ -3,6 +3,7 @@ import './App.css'
 
 const DEFAULT_BUILDER_PATH = './cpp/include/builder'
 const BACKTEST_SETTINGS_KEY = 'quantogral.simpleBacktest.settings'
+const GRID_SEARCH_SETTINGS_KEY = 'quantogral.gridSearch.settings'
 const TRADE_INDICATOR_STYLES_KEY = 'quantogral.tradeChart.indicatorStyles'
 const EXPLORER_SETTINGS_KEY = 'quantogral.projectExplorer.settings'
 const SITE_THEME_KEY = 'quantogral.siteTheme'
@@ -161,6 +162,15 @@ function loadBacktestSettings() {
   }
 }
 
+function loadGridSearchSettings() {
+  try {
+    const settings = JSON.parse(window.localStorage.getItem(GRID_SEARCH_SETTINGS_KEY) || '{}')
+    return settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {}
+  } catch {
+    return {}
+  }
+}
+
 function localDateString(date) {
   const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
   return offsetDate.toISOString().slice(0, 10)
@@ -221,6 +231,14 @@ function setExplorerDragPreview(event) {
   document.body.appendChild(preview)
   event.dataTransfer.setDragImage(preview, Math.min(28, rect.width / 2), rect.height / 2)
   window.setTimeout(() => preview.remove(), 0)
+}
+
+function listReferenceDatasets(nodes, parent = '') {
+  return nodes.flatMap((node) => {
+    const relativePath = parent ? `${parent}/${node.name}` : node.name
+    if (node.type === 'directory') return listReferenceDatasets(node.children || [], relativePath)
+    return /\.(csv|parquet|pq)$/i.test(node.name) ? [{ path: relativePath, label: relativePath }] : []
+  })
 }
 
 function TreeNode({ node, nodeKey, expandedNodes, onToggle, strategies, onSelectStrategy, onSelectData, onOpenItemSettings, selectingStrategies = false, compileSelection = {}, onToggleCompileSelection, selectingDownloadFolder = false, onSelectDownloadFolder, isCodeWorkspace = false, onOpenWorkspaceFile }) {
@@ -374,8 +392,17 @@ function PresetManagerDialog({ strategy, initialData, onPersist, onClose }) {
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [presetRowSettingsId, setPresetRowSettingsId] = useState(null)
+  const presetRowSettingsRef = useRef(null)
   const [unsavedPresetIds, setUnsavedPresetIds] = useState(() => new Set())
   const selected = data.presets.find((preset) => preset.id === selectedId)
+  useEffect(() => {
+    if (!presetRowSettingsId) return undefined
+    const closeOnOutsideClick = (event) => { if (!presetRowSettingsRef.current?.contains(event.target)) setPresetRowSettingsId(null) }
+    const closeOnEscape = (event) => { if (event.key === 'Escape') setPresetRowSettingsId(null) }
+    window.addEventListener('pointerdown', closeOnOutsideClick)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => { window.removeEventListener('pointerdown', closeOnOutsideClick); window.removeEventListener('keydown', closeOnEscape) }
+  }, [presetRowSettingsId])
   const serializeConfig = (value) => JSON.stringify(Object.entries(value || {}).sort(([left], [right]) => left.localeCompare(right)))
   const presetNeedsSave = Boolean(selected && (
     unsavedPresetIds.has(selectedId) ||
@@ -447,7 +474,7 @@ function PresetManagerDialog({ strategy, initialData, onPersist, onClose }) {
         <div className="eyebrow">CODE WORKSPACE · STRATEGY PRESETS</div>
         <h2 id="preset-manager-title">{strategy.name} presets</h2>
         <div className="preset-manager-layout">
-          <div className="preset-list">{data.presets.map((preset) => <div className={`preset-list-row ${preset.id === selectedId ? 'is-selected' : ''}`} key={preset.id}><button className="preset-list-select" onClick={() => { setSelectedId(preset.id); setName(preset.name); setConfig(reconcilePresetConfig(preset, strategy)); setPresetRowSettingsId(null) }} type="button">{preset.name}{presetIsStale(preset, strategy) && <small>STALE</small>}</button><button aria-expanded={presetRowSettingsId === preset.id} aria-label={`${preset.name} settings`} className="item-settings preset-row-settings" onClick={() => setPresetRowSettingsId((current) => current === preset.id ? null : preset.id)} title={`${preset.name} settings`} type="button">⚙</button>{presetRowSettingsId === preset.id && <div className="preset-row-menu"><button className="danger-button" disabled={saving} onClick={() => removePreset(preset.id)} type="button">Delete preset</button></div>}</div>)}<button className="preset-create-button" onClick={createPreset} type="button">+ New preset</button></div>
+          <div className="preset-list">{data.presets.map((preset) => <div className={`preset-list-row ${preset.id === selectedId ? 'is-selected' : ''}`} key={preset.id} ref={presetRowSettingsId === preset.id ? presetRowSettingsRef : null}><button className="preset-list-select" onClick={() => { setSelectedId(preset.id); setName(preset.name); setConfig(reconcilePresetConfig(preset, strategy)); setPresetRowSettingsId(null) }} type="button">{preset.name}{presetIsStale(preset, strategy) && <small>STALE</small>}</button><button aria-expanded={presetRowSettingsId === preset.id} aria-label={`${preset.name} settings`} className="item-settings preset-row-settings" onClick={() => setPresetRowSettingsId((current) => current === preset.id ? null : preset.id)} title={`${preset.name} settings`} type="button">⚙</button>{presetRowSettingsId === preset.id && <div className="preset-row-menu"><button className="danger-button" disabled={saving} onClick={() => removePreset(preset.id)} type="button">Delete preset</button></div>}</div>)}<button className="preset-create-button" onClick={createPreset} type="button">+ New preset</button></div>
           {selected ? <div className="preset-editor">
             <label className="config-field"><span>Preset name</span><input onChange={(event) => setName(event.target.value)} value={name} /></label>
             {presetIsStale(selected, strategy) && <p className="input-help">This preset has changed fields. Matching name and type values are preserved; new or changed fields use current defaults. Save to update it.</p>}
@@ -465,7 +492,7 @@ function BacktestSettingsPanel({ open, draft, error, onToggle, onChange, onSave,
   return (
     <section className={`backtest-settings-panel ${open ? 'is-expanded' : ''}`}>
       <button aria-expanded={open} className="backtest-settings-panel-toggle" onClick={onToggle} type="button">
-        <span className="tree-chevron">{open ? '⌄' : '›'}</span><strong>Run settings</strong><span className="backtest-settings-summary">Capital, currency, costs, allocation, latency</span>
+        <span className="tree-chevron">{open ? '⌄' : '›'}</span><strong>Simple Backtesting settings</strong><span className="backtest-settings-summary">Capital, currency, costs, allocation, latency</span>
       </button>
       {open && <div className="backtest-settings-panel-content">
         <div className="backtest-settings-fields">
@@ -487,6 +514,15 @@ function BacktestSettingsPanel({ open, draft, error, onToggle, onChange, onSave,
       </div>}
     </section>
   )
+}
+
+function GridSearchSettingsPanel({ open, onToggle, settings }) {
+  return <section className={`backtest-settings-panel ${open ? 'is-expanded' : ''}`}>
+    <button aria-expanded={open} className="backtest-settings-panel-toggle" onClick={onToggle} type="button">
+      <span className="tree-chevron">{open ? '⌄' : '›'}</span><strong>GridSearch settings</strong><span className="backtest-settings-summary">Configured separately from Simple Backtesting</span>
+    </button>
+    {open && <div className="backtest-settings-panel-content"><p className="input-help">GridSearch has its own saved settings. {Object.keys(settings).length ? `${Object.keys(settings).length} GridSearch option(s) are saved.` : 'No GridSearch options are configured yet.'} Its search options will be defined with the parameter-search workflow; Simple Backtesting settings are not used here.</p></div>}
+  </section>
 }
 
 function DatasetSettingsDialog({ file, draft, error, saving, onChange, onSave, onClose }) {
@@ -660,6 +696,7 @@ function TradeVisualizer({ seriesOptions, onClose, focusedTrade }) {
   const [savedIndicatorStyles, setSavedIndicatorStyles] = useState(loadTradeIndicatorStyles)
   const [indicatorStyles, setIndicatorStyles] = useState(loadTradeIndicatorStyles)
   const [indicatorSettingsKey, setIndicatorSettingsKey] = useState(null)
+  const indicatorSettingsRef = useRef(null)
   const [savedIndicatorKey, setSavedIndicatorKey] = useState(null)
   const chartWrapRef = useRef(null)
   const [viewportStartIndex, setViewportStartIndex] = useState(0)
@@ -668,6 +705,14 @@ function TradeVisualizer({ seriesOptions, onClose, focusedTrade }) {
   const [chartError, setChartError] = useState(feed?.path ? '' : 'The market-data file for this series is unavailable.')
   const [loading, setLoading] = useState(Boolean(feed?.path))
   const [chartHover, setChartHover] = useState(null)
+  useEffect(() => {
+    if (!indicatorSettingsKey) return undefined
+    const closeOnOutsideClick = (event) => { if (!indicatorSettingsRef.current?.contains(event.target)) setIndicatorSettingsKey(null) }
+    const closeOnEscape = (event) => { if (event.key === 'Escape') setIndicatorSettingsKey(null) }
+    window.addEventListener('pointerdown', closeOnOutsideClick)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => { window.removeEventListener('pointerdown', closeOnOutsideClick); window.removeEventListener('keydown', closeOnEscape) }
+  }, [indicatorSettingsKey])
   useEffect(() => {
     if (!savedIndicatorKey) return undefined
     const timeout = window.setTimeout(() => setSavedIndicatorKey(null), 900)
@@ -819,7 +864,7 @@ function TradeVisualizer({ seriesOptions, onClose, focusedTrade }) {
         setSavedIndicatorKey(indicator.key)
         try { window.localStorage.setItem(TRADE_INDICATOR_STYLES_KEY, JSON.stringify(updated)) } catch { /* Browser storage may be unavailable. */ }
       }
-      return <div className={`trade-indicator-control ${isVisible ? '' : 'is-hidden'}`} key={indicator.key} style={{ '--indicator-color': indicator.color }}>
+      return <div className={`trade-indicator-control ${isVisible ? '' : 'is-hidden'}`} key={indicator.key} ref={indicatorSettingsKey === indicator.key ? indicatorSettingsRef : null} style={{ '--indicator-color': indicator.color }}>
         <button aria-pressed={isVisible} className="trade-indicator-toggle" onClick={() => setHiddenIndicators((current) => ({ ...current, [indicator.key]: current[indicator.key] !== true }))} title={`${isVisible ? 'Hide' : 'Show'} ${indicator.label}`} type="button"><span aria-hidden="true">{isVisible ? '◉' : '○'}</span>{indicator.label}</button>
         <button aria-expanded={indicatorSettingsKey === indicator.key} aria-label={`${indicator.label} line settings`} className="trade-indicator-cog" onClick={() => setIndicatorSettingsKey((current) => current === indicator.key ? null : indicator.key)} title={`${indicator.label} line settings`} type="button">⚙</button>
         {indicatorSettingsKey === indicator.key && <div className="trade-indicator-settings" onClick={(event) => event.stopPropagation()}>
@@ -864,13 +909,21 @@ function TradeVisualizer({ seriesOptions, onClose, focusedTrade }) {
   </section>
 }
 
-function bucketCorrelationData(buckets, frequency) {
+function bucketCorrelationData(scenario, frequency) {
+  const buckets = scenario.buckets || []
+  const sharedCapital = scenario.bucketCapitalMode !== 'INDEPENDENT'
+  const startingCapital = scenario.metrics?.initialEquity || 0
   const interval = frequency === 'hourly' ? 3_600_000 : 86_400_000
-  const periods = [...new Set(buckets.flatMap((bucket) => (bucket.equityTimestamps || []).map((timestamp) => Math.floor(timestamp / interval))))].sort((left, right) => left - right)
+  const periods = [...new Set(buckets.flatMap((bucket) => {
+    const timestamps = sharedCapital ? bucket.contributionTimestamps : bucket.equityTimestamps
+    return (timestamps || []).map((timestamp) => Math.floor(timestamp / interval))
+  }))].sort((left, right) => left - right)
   const series = buckets.map((bucket) => {
-    const initial = bucket.metrics?.initialEquity || 0
+    const initial = sharedCapital ? 0 : (bucket.metrics?.initialEquity || 0)
+    const timestamps = sharedCapital ? (bucket.contributionTimestamps || []) : (bucket.equityTimestamps || [])
+    const curve = sharedCapital ? (bucket.contributionCurve || []) : (bucket.equityCurve || [])
     const byPeriod = new Map()
-    ;(bucket.equityTimestamps || []).forEach((timestamp, index) => byPeriod.set(Math.floor(timestamp / interval), bucket.equityCurve?.[index] ?? initial))
+    timestamps.forEach((timestamp, index) => byPeriod.set(Math.floor(timestamp / interval), curve[index] ?? initial))
     const activePeriods = [...byPeriod.keys()]
     const firstPeriod = activePeriods.length ? Math.min(...activePeriods) : Infinity
     const lastPeriod = activePeriods.length ? Math.max(...activePeriods) : -Infinity
@@ -881,16 +934,21 @@ function bucketCorrelationData(buckets, frequency) {
       if (byPeriod.has(period)) current = byPeriod.get(period)
       peak = Math.max(peak, current)
       const active = period >= firstPeriod && period <= lastPeriod
-      const point = { period, equity: current, drawdownPct: active && peak > 0 ? (current / peak - 1) * 100 : null, drawdownDollars: active ? current - peak : null, returnPct: active && previous > 0 ? (current / previous - 1) * 100 : null }
+      const change = current - previous
+      const point = {
+        period,
+        equity: current,
+        contributionChange: active ? change : null,
+        drawdownPct: !sharedCapital && active && peak > 0 ? (current / peak - 1) * 100 : null,
+        drawdownDollars: active ? current - peak : null,
+        returnPct: active && (sharedCapital ? startingCapital > 0 : previous > 0)
+          ? (change / (sharedCapital ? startingCapital : previous)) * 100
+          : null,
+      }
       previous = current
       return point
     })
-    return { bucket, initial, values, returns: values.map((point) => point.returnPct), drawdowns: values.map((point) => point.drawdownPct) }
-  })
-  const portfolioValues = periods.map((_, index) => series.reduce((total, item) => total + (item.values[index]?.equity ?? item.initial), 0))
-  const portfolioReturns = portfolioValues.map((value, index) => {
-    const previous = index === 0 ? series.reduce((total, item) => total + item.initial, 0) : portfolioValues[index - 1]
-    return previous > 0 ? (value / previous - 1) * 100 : 0
+    return { bucket, initial, values, returns: values.map((point) => point.returnPct), drawdowns: values.map((point) => sharedCapital ? point.drawdownDollars : point.drawdownPct) }
   })
   const correlation = (left, right) => {
     if (left.length < 2 || left.length !== right.length) return null
@@ -910,51 +968,171 @@ function bucketCorrelationData(buckets, frequency) {
     }
     return leftVariance > 0 && rightVariance > 0 ? covariance / Math.sqrt(leftVariance * rightVariance) : null
   }
-  const regressions = series.map((item) => {
-    const pairs = item.returns.flatMap((value, index) => Number.isFinite(value) && Number.isFinite(portfolioReturns[index]) ? [[value, portfolioReturns[index]]] : [])
-    const beta = pairs.length > 1 ? (() => {
-      const bucketMean = pairs.reduce((sum, [value]) => sum + value, 0) / pairs.length
-      const benchmarkMean = pairs.reduce((sum, [, value]) => sum + value, 0) / pairs.length
-      const covariance = pairs.reduce((sum, [bucketValue, benchmarkValue]) => sum + (benchmarkValue - benchmarkMean) * (bucketValue - bucketMean), 0)
-      const variance = pairs.reduce((sum, [, value]) => sum + (value - benchmarkMean) ** 2, 0)
-      return variance > 0 ? covariance / variance : null
-    })() : null
-    const bucketMean = pairs.length ? pairs.reduce((sum, [value]) => sum + value, 0) / pairs.length : 0
-    const benchmarkMean = pairs.length ? pairs.reduce((sum, [, value]) => sum + value, 0) / pairs.length : 0
-    const alpha = beta == null ? null : bucketMean - beta * benchmarkMean
-    const r = correlation(item.returns, portfolioReturns)
-    return { alpha, beta, rSquared: r == null ? null : r * r }
-  })
-  return { periods, series, portfolioReturns, regressions, correlation }
+  return { periods, series, correlation, sharedCapital }
 }
 
 function correlationCellStyle(value) {
   if (!Number.isFinite(value)) return { background: '#272c31', color: '#8d979f' }
-  const strength = Math.min(0.55, 0.12 + Math.abs(value) * 0.43)
-  return value >= 0
-    ? { background: `rgba(54, 160, 113, ${strength})`, color: '#e5f7ee' }
-    : { background: `rgba(204, 83, 93, ${strength})`, color: '#ffeaec' }
+  const stops = value < 0
+    ? [[37, 99, 235], [48, 52, 58], Math.abs(value)]
+    : [[48, 52, 58], [220, 48, 56], value]
+  const [from, to, amount] = stops
+  const rgb = from.map((channel, index) => Math.round(channel + (to[index] - channel) * amount))
+  return { background: `rgb(${rgb.join(' ')})`, color: '#fff' }
 }
 
 function BucketCorrelationMatrix({ scenario, frequency, onFrequencyChange }) {
-  const data = bucketCorrelationData(scenario.buckets || [], frequency)
-  const renderMatrix = (title, valuesKey) => <section className="bucket-correlation-section"><h4>{title}</h4><div className="bucket-correlation-table-wrap"><table className="bucket-correlation-table"><thead><tr><th></th>{data.series.map(({ bucket }) => <th key={bucket.id}>{bucket.id}</th>)}</tr></thead><tbody>{data.series.map((row, rowIndex) => <tr key={row.bucket.id}><th>{row.bucket.id}</th>{data.series.map((column, columnIndex) => { const value = rowIndex === columnIndex ? 1 : data.correlation(row[valuesKey], column[valuesKey]); return <td key={column.bucket.id} style={correlationCellStyle(value)}>{Number.isFinite(value) ? value.toFixed(2) : '—'}</td> })}</tr>)}</tbody></table></div></section>
+  const data = bucketCorrelationData(scenario, frequency)
+  const renderMatrix = (title, valuesKey) => <section className="bucket-correlation-section"><h4>{title}</h4><div className="bucket-correlation-table-wrap"><table className="bucket-correlation-table"><thead><tr><th></th>{data.series.map(({ bucket }) => <th key={bucket.id}>{bucket.id}</th>)}</tr></thead><tbody>{data.series.map((row, rowIndex) => <tr key={row.bucket.id}><th>{row.bucket.id}</th>{data.series.map((column, columnIndex) => { if (columnIndex >= rowIndex) return <td aria-hidden="true" className="correlation-empty-cell" key={column.bucket.id} />; const value = data.correlation(row[valuesKey], column[valuesKey]); return <td key={column.bucket.id} style={correlationCellStyle(value)}>{Number.isFinite(value) ? value.toFixed(2) : '—'}</td> })}</tr>)}</tbody></table></div></section>
   return <div className="bucket-correlation-view">
-    <div className="bucket-correlation-heading"><div><h3>Bucket correlation · {scenario.scenarioLabel}</h3><p>Returns and drawdown are sampled at each UTC interval close; missing intervals carry the last equity forward.</p></div><label>Aggregation<select onChange={(event) => onFrequencyChange(event.target.value)} value={frequency}><option value="daily">Daily</option><option value="hourly">Hourly</option></select></label></div>
+    <div className="bucket-correlation-heading"><div><h3>Bucket correlation · {scenario.scenarioLabel}</h3><p>{data.sharedCapital ? 'Shared-capital bucket contributions, normalized by total starting capital. Drawdown is measured in currency from each contribution series’ prior peak; these are attribution series, not standalone account returns.' : 'Standalone bucket returns and drawdown are sampled at each UTC interval close; missing intervals carry the last equity forward.'}</p></div><label>Aggregation<select onChange={(event) => onFrequencyChange(event.target.value)} value={frequency}><option value="daily">Daily</option><option value="hourly">Hourly</option></select></label></div>
     {!data.series.length || data.periods.length < 2 ? <p className="input-help">Not enough bucket equity history to calculate correlations.</p> : <>
-      {renderMatrix('Equity return correlation', 'returns')}
-      {renderMatrix('Drawdown level correlation', 'drawdowns')}
-      <p className="input-help">Regression values compare each bucket’s interval returns with the combined portfolio returns. Alpha is the per-interval intercept; beta is sensitivity to the portfolio; R² is the share of return variation explained by it.</p>
-      <div className="orders-table-wrap"><table className="orders-table bucket-regression-table"><thead><tr><th>Bucket</th><th>Alpha / interval</th><th>Beta</th><th>R²</th></tr></thead><tbody>{data.series.map(({ bucket }, index) => <tr key={bucket.id}><td>{bucket.id}</td><td>{reportNumber(data.regressions[index]?.alpha, '%', 4)}</td><td>{reportNumber(data.regressions[index]?.beta, '', 4)}</td><td>{reportNumber(data.regressions[index]?.rSquared, '', 4)}</td></tr>)}</tbody></table></div>
+      {renderMatrix(data.sharedCapital ? 'Bucket contribution return correlation' : 'Equity return correlation', 'returns')}
+      {renderMatrix(data.sharedCapital ? 'Bucket contribution drawdown ($) correlation' : 'Drawdown level correlation', 'drawdowns')}
     </>}
   </div>
+}
+
+function regressionForReference(referencePoints, responsePoints, frequency, contributionBase = null) {
+  const interval = frequency === 'hourly' ? 3_600_000 : 86_400_000
+  const benchmarkLevels = new Map()
+  const responseLevels = new Map()
+  referencePoints.forEach((point) => benchmarkLevels.set(Math.floor(point.timestamp / interval), point.price))
+  responsePoints.forEach((point) => responseLevels.set(Math.floor(point.timestamp / interval), point.value))
+  const matchedPeriods = [...benchmarkLevels.keys()].filter((period) => responseLevels.has(period)).sort((left, right) => left - right)
+  const x = []
+  const y = []
+  for (let index = 1; index < matchedPeriods.length; index += 1) {
+    const previousPeriod = matchedPeriods[index - 1]
+    const currentPeriod = matchedPeriods[index]
+    const previousBenchmark = benchmarkLevels.get(previousPeriod)
+    const currentBenchmark = benchmarkLevels.get(currentPeriod)
+    const previousResponse = responseLevels.get(previousPeriod)
+    const currentResponse = responseLevels.get(currentPeriod)
+    if (!(previousBenchmark > 0) || !(previousResponse > 0) && contributionBase === null) continue
+    const xReturn = (currentBenchmark / previousBenchmark - 1) * 100
+    const yReturn = contributionBase === null
+      ? (currentResponse / previousResponse - 1) * 100
+      : (currentResponse - previousResponse) / contributionBase * 100
+    if (Number.isFinite(xReturn) && Number.isFinite(yReturn)) { x.push(xReturn); y.push(yReturn) }
+  }
+  if (x.length < 2) return { observations: x.length, alpha: null, beta: null, rSquared: null, firstPeriod: matchedPeriods[0], lastPeriod: matchedPeriods.at(-1) }
+  const xMean = x.reduce((sum, value) => sum + value, 0) / x.length
+  const yMean = y.reduce((sum, value) => sum + value, 0) / y.length
+  const covariance = x.reduce((sum, value, index) => sum + (value - xMean) * (y[index] - yMean), 0)
+  const xVariance = x.reduce((sum, value) => sum + (value - xMean) ** 2, 0)
+  const yVariance = y.reduce((sum, value) => sum + (value - yMean) ** 2, 0)
+  if (xVariance === 0 || yVariance === 0) return { observations: x.length, alpha: null, beta: null, rSquared: null, correlation: null, firstPeriod: matchedPeriods[0], lastPeriod: matchedPeriods.at(-1) }
+  const beta = covariance / xVariance
+  const alpha = yMean - beta * xMean
+  const rSquared = (covariance * covariance) / (xVariance * yVariance)
+  const correlation = covariance / Math.sqrt(xVariance * yVariance)
+  return { observations: x.length, alpha, beta, rSquared, correlation, firstPeriod: matchedPeriods[0], lastPeriod: matchedPeriods.at(-1) }
+}
+
+function equityResponsePoints(scenario) {
+  return (scenario.equityTimestamps || []).flatMap((timestamp, index) => Number.isFinite(scenario.equityCurve?.[index]) ? [{ timestamp, value: scenario.equityCurve[index] }] : [])
+}
+
+function BucketBenchmarkRegression({ scenarios, benchmarkFiles, frequency }) {
+  const defaultPath = benchmarkFiles.find((file) => file.path.includes('/benchmarks/') && file.path.includes('_1d_'))?.path
+    || benchmarkFiles.find((file) => file.path.includes('/benchmarks/'))?.path
+    || benchmarkFiles[0]?.path
+  const [selectedPath, setSelectedPath] = useState(defaultPath || '')
+  const [userPickedDataset, setUserPickedDataset] = useState(false)
+  const [tsUnit, setTsUnit] = useState('MILLISECONDS')
+  const [dateFormat, setDateFormat] = useState('DDMMYYYY')
+  const [reference, setReference] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const validSelectedPath = benchmarkFiles.some((file) => file.path === selectedPath) ? selectedPath : (defaultPath || '')
+  const expectedSAndPInterval = frequency === 'hourly' ? '1h' : '1d'
+  const matchingSAndPFile = benchmarkFiles.find((file) => file.path.startsWith('reference/benchmarks/SP500_') && file.path.includes(`_${expectedSAndPInterval}_`))
+  const effectivePath = !userPickedDataset && validSelectedPath.startsWith('reference/benchmarks/SP500_') && matchingSAndPFile
+    ? matchingSAndPFile.path
+    : validSelectedPath
+  const activeReference = effectivePath ? reference : null
+  useEffect(() => {
+    if (!effectivePath) return undefined
+    const controller = new AbortController()
+    const loadReference = async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const query = new URLSearchParams({ path: effectivePath, tsUnit, dateFormat })
+        const response = await fetch(`/api/backtests/reference-series?${query}`, { signal: controller.signal })
+        const result = await readApiJson(response, 'regression reference data')
+        if (!response.ok) throw new Error(result.error || 'Could not read the selected reference dataset.')
+        setReference(result)
+      } catch (loadError) {
+        if (loadError.name !== 'AbortError') { setReference(null); setError(loadError.message) }
+      } finally {
+        if (!controller.signal.aborted) setLoading(false)
+      }
+    }
+    loadReference()
+    return () => controller.abort()
+  }, [effectivePath, tsUnit, dateFormat])
+
+  const tooCoarseForHourly = frequency === 'hourly' && activeReference?.medianGapMs > 2 * 3_600_000
+  const interval = frequency === 'hourly' ? 3_600_000 : 86_400_000
+  const regressions = useMemo(() => {
+    if (!activeReference || tooCoarseForHourly) return []
+    return scenarios.map((scenario) => {
+      const shared = scenario.bucketCapitalMode !== 'INDEPENDENT'
+      const rows = [{ label: 'Total portfolio', response: equityResponsePoints(scenario), contributionBase: null }]
+      for (const bucket of scenario.buckets || []) {
+        const timestamps = shared ? (bucket.contributionTimestamps || []) : (bucket.equityTimestamps || [])
+        const curve = shared ? (bucket.contributionCurve || []) : (bucket.equityCurve || [])
+        const response = timestamps.flatMap((timestamp, index) => Number.isFinite(curve[index]) ? [{ timestamp, value: curve[index] }] : [])
+        rows.push({ label: shared ? `${bucket.id} contribution` : bucket.id, response, contributionBase: shared ? scenario.metrics?.initialEquity : null })
+      }
+      return {
+        scenario,
+        rows: rows.map((row) => ({ ...row, ...regressionForReference(activeReference.points, row.response, frequency, row.contributionBase) })),
+      }
+    })
+  }, [activeReference, scenarios, frequency, tooCoarseForHourly])
+
+  return <>
+    {activeReference && !loading && !error && !tooCoarseForHourly && <section className="bucket-correlation-section benchmark-correlation-section">
+      <h3>Benchmark return correlation · {frequency}</h3>
+      {regressions.map(({ scenario, rows }) => <div className="benchmark-regression-scenario" key={scenario.scenarioId}>
+        <h4>{scenario.scenarioLabel}</h4>
+        <div className="bucket-correlation-table-wrap"><table className="bucket-correlation-table">
+          <thead><tr><th>Benchmark</th>{rows.map((row) => <th key={row.label}>{row.label}</th>)}</tr></thead>
+          <tbody><tr><th>{benchmarkFiles.find((file) => file.path === effectivePath)?.label || effectivePath}</th>{rows.map((row) => <td key={row.label} style={correlationCellStyle(row.correlation)}>{Number.isFinite(row.correlation) ? row.correlation.toFixed(2) : '—'}</td>)}</tr></tbody>
+        </table></div>
+      </div>)}
+    </section>}
+    <section className="benchmark-regression-section">
+    <div className="bucket-correlation-heading"><div><h3>Regression against reference dataset</h3><p>Reference returns are the regressor (x); each bucket and the total portfolio are response series (y). Benchmark prices are sampled to {frequency} UTC closes before returns are calculated.</p></div></div>
+    <div className="benchmark-regression-controls">
+      <label>Reference dataset<select onChange={(event) => { setUserPickedDataset(true); setSelectedPath(event.target.value) }} value={effectivePath}>{benchmarkFiles.map((file) => <option key={file.path} value={file.path}>{file.label}</option>)}</select></label>
+      <label>Numeric timestamp<select onChange={(event) => setTsUnit(event.target.value)} value={tsUnit}><option>SECONDS</option><option>MILLISECONDS</option><option>MICROSECONDS</option><option>NANOSECONDS</option></select></label>
+      <label>Date order<select onChange={(event) => setDateFormat(event.target.value)} value={dateFormat}><option>DDMMYYYY</option><option>MMDDYYYY</option></select></label>
+    </div>
+    {!benchmarkFiles.length && <p className="input-help">Add a CSV or Parquet price series under data/ to use it as a regression reference.</p>}
+    {effectivePath && loading && <p className="input-help">Loading reference prices…</p>}
+    {effectivePath && error && <p className="form-error">{error}</p>}
+    {tooCoarseForHourly && <p className="form-error">This reference dataset is too coarse for hourly regression. Choose an hourly or finer price series.</p>}
+    {activeReference && !loading && !error && !tooCoarseForHourly && <>
+      <p className="input-help">Using {activeReference.priceColumn} · {activeReference.currency} · {activeReference.points.length.toLocaleString()} prices. Regressions use only matching interval closes. A currency mismatch with the portfolio is not FX-adjusted.</p>
+      {regressions.map(({ scenario, rows }) => <section className="benchmark-regression-scenario" key={scenario.scenarioId}><h4>{scenario.scenarioLabel}</h4><div className="orders-table-wrap"><table className="orders-table bucket-regression-table"><thead><tr><th>Response series</th><th>Alpha / {frequency} interval</th><th>Beta</th><th>R²</th><th>Observations</th><th>Matched range</th></tr></thead><tbody>{rows.map((row) => {
+        const start = Number.isFinite(row.firstPeriod) ? new Date(row.firstPeriod * interval).toLocaleDateString() : '—'
+        const end = Number.isFinite(row.lastPeriod) ? new Date(row.lastPeriod * interval).toLocaleDateString() : '—'
+        return <tr key={row.label}><td>{row.label}</td><td>{reportNumber(row.alpha, '%', 4)}</td><td>{reportNumber(row.beta, '', 4)}</td><td>{reportNumber(row.rSquared, '', 4)}</td><td>{row.observations.toLocaleString()}</td><td>{start} – {end}</td></tr>
+      })}</tbody></table></div></section>)}
+    </>}
+    </section>
+  </>
 }
 
 function BucketPerformanceView({ scenarios, currency }) {
   return <div className="bucket-performance-scenarios">{scenarios.map((scenario) => <section className="bucket-performance-scenario" key={scenario.scenarioId}><div className="config-section-heading"><h3>{scenario.scenarioLabel} · bucket performance</h3><span>Each bucket uses its own equal share of total starting capital</span></div><div className="bucket-performance-grid">{(scenario.buckets || []).map((bucket) => <article className="bucket-performance-card" key={bucket.id}><div className="bucket-performance-card-heading"><h4>{bucket.id}</h4><span>{bucket.feeds?.length || 0} feeds · {bucket.strategies?.length || 0} strategies</span></div><div className="report-metric-grid"><div><span>Profit</span><strong>{reportNumber(bucket.metrics?.profitPct, '%')}</strong></div><div><span>Maximum drawdown</span><strong>{reportMoney(bucket.metrics?.maxDrawdownDollars, currency)} · {reportNumber(bucket.metrics?.maxDrawdownPct, '%')}</strong></div><div><span>Sharpe</span><strong>{reportNumber(bucket.metrics?.sharpe, '', 4)}</strong></div><div><span>Trades / year</span><strong>{reportNumber(bucket.metrics?.tradesPerYear)}</strong></div></div><EquityCurveChart currency={currency} scenarios={[{ scenarioId: bucket.id, scenarioLabel: bucket.id, metrics: bucket.metrics, equityCurve: bucket.equityCurve || [], equityTimestamps: bucket.equityTimestamps || [] }]} /></article>)}</div></section>)}</div>
 }
 
-function BacktestReport({ scenarios, compare }) {
+function BacktestReport({ scenarios, compare, benchmarkFiles }) {
   const [activeTab, setActiveTab] = useState('general')
   const [performanceView, setPerformanceView] = useState('portfolio')
   const [correlationFrequency, setCorrelationFrequency] = useState('daily')
@@ -972,6 +1150,11 @@ function BacktestReport({ scenarios, compare }) {
   }, [activeMetricHelp])
   const detailScenario = scenarios.find((scenario) => scenario.scenarioId === detailScenarioId) || scenarios[0]
   const currency = detailScenario.metrics.currency || 'USD'
+  const hasIndependentBuckets = detailScenario.bucketCapitalMode === 'INDEPENDENT'
+  const performanceViews = hasIndependentBuckets
+    ? [['portfolio', 'Portfolio'], ['buckets', 'Buckets'], ['correlation', 'Correlation']]
+    : [['portfolio', 'Portfolio'], ['correlation', 'Correlation']]
+  const activePerformanceView = performanceViews.some(([id]) => id === performanceView) ? performanceView : 'portfolio'
   const indicatorColors = ['#a887ff', '#57b8ed', '#f1b654', '#ef7fab', '#52d1c3', '#a5c96b']
   const tradeSeriesOptions = (detailScenario.buckets || []).flatMap((bucket) => (bucket.feeds || []).map((feed) => {
     const trades = (detailScenario.trades || []).filter((trade) => trade.bucketId === bucket.id && trade.feedId === feed.id)
@@ -1035,12 +1218,12 @@ function BacktestReport({ scenarios, compare }) {
         <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('general')}</div>
       </>}
       {activeTab === 'performance' && <>
-        {detailScenario.bucketCapitalMode === 'INDEPENDENT' && <nav aria-label="Performance views" className="performance-subtabs">
-          {[['portfolio', 'Portfolio'], ['buckets', 'Buckets'], ['correlation', 'Correlation']].map(([id, label]) => <button aria-pressed={performanceView === id} className={performanceView === id ? 'is-active' : ''} key={id} onClick={() => setPerformanceView(id)} type="button">{label}</button>)}
-        </nav>}
-        {detailScenario.bucketCapitalMode !== 'INDEPENDENT' || performanceView === 'portfolio' ? <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div> : null}
-        {detailScenario.bucketCapitalMode === 'INDEPENDENT' && performanceView === 'buckets' && <BucketPerformanceView currency={currency} scenarios={scenarios} />}
-        {detailScenario.bucketCapitalMode === 'INDEPENDENT' && performanceView === 'correlation' && <div className="bucket-correlation-scenarios">{scenarios.map((scenario) => <BucketCorrelationMatrix frequency={correlationFrequency} key={scenario.scenarioId} onFrequencyChange={setCorrelationFrequency} scenario={scenario} />)}</div>}
+        <nav aria-label="Performance views" className="performance-subtabs">
+          {performanceViews.map(([id, label]) => <button aria-pressed={activePerformanceView === id} className={activePerformanceView === id ? 'is-active' : ''} key={id} onClick={() => setPerformanceView(id)} type="button">{label}</button>)}
+        </nav>
+        {activePerformanceView === 'portfolio' && <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div>}
+        {hasIndependentBuckets && activePerformanceView === 'buckets' && <BucketPerformanceView currency={currency} scenarios={scenarios} />}
+        {activePerformanceView === 'correlation' && <div className="bucket-correlation-scenarios">{scenarios.map((scenario) => <BucketCorrelationMatrix frequency={correlationFrequency} key={scenario.scenarioId} onFrequencyChange={setCorrelationFrequency} scenario={scenario} />)}<BucketBenchmarkRegression frequency={correlationFrequency} scenarios={scenarios} benchmarkFiles={benchmarkFiles} /></div>}
       </>}
       {activeTab === 'trades' && visualizeSeries ? <TradeVisualizer key={`${detailScenario.scenarioId}:${visualizeSeries.bucketId || 'all'}:${visualizeSeries.instanceId || 'all'}`} focusedTrade={visualizeSeries === true ? null : visualizeSeries} onClose={() => setVisualizeSeries(false)} seriesOptions={tradeSeriesOptions} /> : activeTab === 'trades' && <>
         {tradeSeriesOptions.length > 0 && <div className="trade-series-actions"><span>{detailScenario.trades.length.toLocaleString()} completed trades across {tradeSeriesOptions.length.toLocaleString()} data series</span><button className="trade-visualize-button" onClick={() => setVisualizeSeries(true)} type="button">Visualize series</button></div>}
@@ -1070,6 +1253,7 @@ function BacktestBucketPanel({
   onManualPathChange, onManualPathKeyDown, onAddManualPath,
 }) {
   const [collapsedFeedSections, setCollapsedFeedSections] = useState({})
+  const [collapsed, setCollapsed] = useState(false)
   const foreignCurrencies = [...new Set(dataFiles.map((feed) => feed.datasetSettings?.currency).filter((currency) => currency && currency !== baseCurrency))]
   const coveredCurrencies = (fxFile) => foreignCurrencies.filter((currency) => {
     const pair = [fxFile.datasetSettings?.fxBaseCurrency, fxFile.datasetSettings?.fxQuoteCurrency]
@@ -1078,12 +1262,19 @@ function BacktestBucketPanel({
   return (
     <section className="backtest-bucket">
       <div className="backtest-bucket-heading">
-        <div><span className="eyebrow">BACKTEST BUCKET</span><h2>{bucket.name}</h2></div>
+        <div className="backtest-bucket-heading-main">
+          <button aria-expanded={!collapsed} aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${bucket.name}`} className="bucket-collapse-toggle" onClick={() => setCollapsed((current) => !current)} type="button">
+            <span aria-hidden="true" className="tree-chevron">{collapsed ? '›' : '⌄'}</span>
+            <span><span className="eyebrow">BACKTEST BUCKET</span><span className="bucket-title">{bucket.name}</span></span>
+          </button>
+          {collapsed && <small className="bucket-collapsed-summary">{strategies.length} strategies · {dataFiles.length} feeds</small>}
+        </div>
         <button className={`secondary-button bucket-sidebar-select ${selectedForSidebar ? 'is-selected' : ''}`} onClick={() => onSelectBucket(bucket.id)} type="button">
           {selectedForSidebar ? 'Selected for sidebar adds' : 'Use for sidebar adds'}
         </button>
       </div>
 
+      {!collapsed && <>
       <section className="config-section assembly-section">
         <div className="config-section-heading"><h2>Strategies</h2><span>{strategies.length} added</span></div>
         <div
@@ -1176,6 +1367,7 @@ function BacktestBucketPanel({
           <button aria-label={`Remove FX history ${feed.name}`} className="remove-item-button" onClick={() => onRemoveFxFile(feed.instanceId)} type="button">×</button>
         </div>)}</div>}
       </section>}
+      </>}
     </section>
   )
 }
@@ -1189,6 +1381,7 @@ function App() {
   const [builderExpanded, setBuilderExpanded] = useState(() => loadExplorerSettings().builderExpanded)
   const [builderTree, setBuilderTree] = useState([])
   const [dataTree, setDataTree] = useState([])
+  const benchmarkFiles = useMemo(() => listReferenceDatasets(dataTree), [dataTree])
   const [expandedNodes, setExpandedNodes] = useState(() => loadExplorerSettings().expandedNodes)
   const [builderPath, setBuilderPath] = useState(DEFAULT_BUILDER_PATH)
   const [pathDraft, setPathDraft] = useState(DEFAULT_BUILDER_PATH)
@@ -1251,13 +1444,15 @@ function App() {
   const [backtestResult, setBacktestResult] = useState(null)
   const [activeBacktestScenarioId, setActiveBacktestScenarioId] = useState('both')
   const [backtestError, setBacktestError] = useState('')
-  const [backtestSettingsError, setBacktestSettingsError] = useState('')
+  const [simpleBacktestSettingsError, setSimpleBacktestSettingsError] = useState('')
   const [isRunningBacktest, setIsRunningBacktest] = useState(false)
   const [backtestElapsedMs, setBacktestElapsedMs] = useState(null)
   const backtestStartedAt = useRef(null)
-  const [backtestSettingsOpen, setBacktestSettingsOpen] = useState(false)
-  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', bucket_capital_mode: 'SHARED', base_currency: 'USD', ignore_currency: false })
-  const [backtestConfig, setBacktestConfig] = useState(loadBacktestSettings)
+  const [simpleBacktestSettingsOpen, setSimpleBacktestSettingsOpen] = useState(false)
+  const [simpleBacktestSettingsDraft, setSimpleBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', bucket_capital_mode: 'SHARED', base_currency: 'USD', ignore_currency: false })
+  const [simpleBacktestConfig, setSimpleBacktestConfig] = useState(loadBacktestSettings)
+  const [gridSearchSettingsOpen, setGridSearchSettingsOpen] = useState(false)
+  const [gridSearchConfig, setGridSearchConfig] = useState(loadGridSearchSettings)
   const [yahooTicker, setYahooTicker] = useState('')
   const [selectedYahooInstruments, setSelectedYahooInstruments] = useState([])
   const [yahooSymbolResults, setYahooSymbolResults] = useState([])
@@ -1572,11 +1767,17 @@ function App() {
         const config = await response.json()
         if (isCurrent) {
           setBuilderPath(config.builder.path)
-          const savedSettings = config.backtestConfigured ? config.backtest : loadBacktestSettings()
-          setBacktestConfig(savedSettings)
-          setBacktestSettingsDraft(savedSettings)
-          if (!config.backtestConfigured) {
-            fetch('/api/config/backtest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(savedSettings) }).catch(() => {})
+          const savedSettings = config.simpleBacktestConfigured ? config.simple_backtest : loadBacktestSettings()
+          setSimpleBacktestConfig(savedSettings)
+          setSimpleBacktestSettingsDraft(savedSettings)
+          const savedGridSettings = config.gridSearchConfigured ? config.grid_search : loadGridSearchSettings()
+          setGridSearchConfig(savedGridSettings)
+          try { window.localStorage.setItem(GRID_SEARCH_SETTINGS_KEY, JSON.stringify(savedGridSettings)) } catch { /* Project config remains the saved copy. */ }
+          if (!config.simpleBacktestConfigured) {
+            await fetch('/api/config/backtest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...savedSettings, mode: 'simple' }) })
+          }
+          if (!config.gridSearchConfigured) {
+            await fetch('/api/config/backtest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'gridsearch', settings: savedGridSettings }) })
           }
         }
       } catch (error) {
@@ -1708,42 +1909,46 @@ function App() {
     }
   }
 
-  function openBacktestSettings() {
-    setBacktestSettingsError('')
-    if (backtestSettingsOpen) {
-      setBacktestSettingsOpen(false)
+  function openSimpleBacktestSettings() {
+    setSimpleBacktestSettingsError('')
+    if (simpleBacktestSettingsOpen) {
+      setSimpleBacktestSettingsOpen(false)
     } else {
-      setBacktestSettingsDraft(backtestConfig)
-      setBacktestSettingsOpen(true)
+      setSimpleBacktestSettingsDraft(simpleBacktestConfig)
+      setSimpleBacktestSettingsOpen(true)
     }
   }
 
-  function updateBacktestSettingsDraft(key, value) {
-    setBacktestSettingsDraft((settings) => ({ ...settings, [key]: value }))
+  function updateSimpleBacktestSettingsDraft(key, value) {
+    setSimpleBacktestSettingsDraft((settings) => ({ ...settings, [key]: value }))
   }
 
-  async function saveBacktestSettings() {
+  async function saveSimpleBacktestSettings() {
     const settings = {
-      initial_capital: Number(backtestSettingsDraft.initial_capital),
-      cost_bps: Number(backtestSettingsDraft.cost_bps),
-      fill_latency_seconds: Number(backtestSettingsDraft.fill_latency_seconds),
-      capital_allocation: backtestSettingsDraft.capital_allocation,
-      bucket_capital_mode: backtestSettingsDraft.bucket_capital_mode || 'SHARED',
-      run_mode: backtestSettingsDraft.run_mode,
-      base_currency: backtestSettingsDraft.base_currency,
-      ignore_currency: Boolean(backtestSettingsDraft.ignore_currency),
+      initial_capital: Number(simpleBacktestSettingsDraft.initial_capital),
+      cost_bps: Number(simpleBacktestSettingsDraft.cost_bps),
+      fill_latency_seconds: Number(simpleBacktestSettingsDraft.fill_latency_seconds),
+      capital_allocation: simpleBacktestSettingsDraft.capital_allocation,
+      bucket_capital_mode: simpleBacktestSettingsDraft.bucket_capital_mode || 'SHARED',
+      run_mode: simpleBacktestSettingsDraft.run_mode,
+      base_currency: simpleBacktestSettingsDraft.base_currency,
+      ignore_currency: Boolean(simpleBacktestSettingsDraft.ignore_currency),
     }
-    setBacktestSettingsError('')
+    setSimpleBacktestSettingsError('')
     try {
-      const response = await fetch('/api/config/backtest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) })
+      const response = await fetch('/api/config/backtest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...settings, mode: 'simple' }) })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Could not save backtest settings.')
-      setBacktestConfig(settings)
+      setSimpleBacktestConfig(settings)
       try { window.localStorage.setItem(BACKTEST_SETTINGS_KEY, JSON.stringify(settings)) } catch { /* The local project config remains the saved copy. */ }
-      setBacktestSettingsOpen(false)
+      setSimpleBacktestSettingsOpen(false)
     } catch (error) {
-      setBacktestSettingsError(error.message)
+      setSimpleBacktestSettingsError(error.message)
     }
+  }
+
+  function openGridSearchSettings() {
+    setGridSearchSettingsOpen((open) => !open)
   }
 
   function beginCreateItem() {
@@ -2204,7 +2409,7 @@ function App() {
               parameters: strategy.strategyConfigDraft,
             })),
           })),
-          backtestConfig,
+          backtestConfig: simpleBacktestConfig,
         }),
       })
       const result = await readApiJson(response, 'backtest run')
@@ -2443,8 +2648,7 @@ function App() {
           <section className="home-view">
             <button aria-label="Back to Home" className="back-link" onClick={() => navigateToPage('home')} title="Back to Home" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">RESEARCH</div>
-            <div className="simple-backtest-title-row"><h1>Backtesting</h1><button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button></div>
-            <BacktestSettingsPanel draft={backtestSettingsDraft} error={backtestSettingsError} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsError(''); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
+            <h1>Backtesting</h1>
             <p className="page-description">Choose a backtesting method.</p>
             <div className="workspace-tiles">
               <button className="workspace-tile" onClick={() => navigateToPage('simplebacktesting')} type="button">
@@ -2465,9 +2669,9 @@ function App() {
             <div className="eyebrow">BACKTESTING</div>
             <div className="simple-backtest-title-row">
               <h1>Simple Backtesting</h1>
-              <button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button>
+              <button aria-label="Backtest settings" className="backtest-settings-button" onClick={openSimpleBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button>
             </div>
-            <BacktestSettingsPanel draft={backtestSettingsDraft} error={backtestSettingsError} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsError(''); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
+            <BacktestSettingsPanel draft={simpleBacktestSettingsDraft} error={simpleBacktestSettingsError} onCancel={() => { setSimpleBacktestSettingsDraft(simpleBacktestConfig); setSimpleBacktestSettingsError(''); setSimpleBacktestSettingsOpen(false) }} onChange={updateSimpleBacktestSettingsDraft} onSave={saveSimpleBacktestSettings} onToggle={openSimpleBacktestSettings} open={simpleBacktestSettingsOpen} />
               <p className="page-description">Add strategies and market-data files from the project explorer, then configure each strategy.</p>
 
             <form className="simple-backtest-form" onSubmit={runSimpleBacktest}>
@@ -2485,8 +2689,8 @@ function App() {
                   strategies={backtestStrategies.filter((strategy) => strategy.bucketId === bucket.id)}
                   dataFiles={dataFiles.filter((feed) => feed.bucketId === bucket.id)}
                   fxFiles={fxFiles.filter((feed) => feed.bucketId === bucket.id)}
-                  baseCurrency={backtestConfig.base_currency || 'USD'}
-                  ignoreCurrency={backtestConfig.ignore_currency}
+                  baseCurrency={simpleBacktestConfig.base_currency || 'USD'}
+                  ignoreCurrency={simpleBacktestConfig.ignore_currency}
                   fxDropHover={fxDropHoverBucket === bucket.id}
                   onFxDragEnter={(bucketId, event) => { event.preventDefault(); setFxDropHoverBucket(bucketId) }}
                   onFxDragLeave={(bucketId, event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFxDropHoverBucket((current) => current === bucketId ? null : current) }}
@@ -2523,6 +2727,7 @@ function App() {
                   onAddManualPath={addManualDataFile}
                 />
               </div>)}
+              <button className="secondary-button add-bucket-after-list" disabled={isRunningBacktest} onClick={addBacktestBucket} type="button">+ Add bucket</button>
 
               {!compilation.current && (
                 <div className="engine-notice">
@@ -2532,7 +2737,7 @@ function App() {
               )}
               {backtestError && <p className="form-error">{backtestError}</p>}
               <button className="primary-button run-backtest-button" disabled={!compilation.current || backtestStrategies.length === 0 || dataFiles.length === 0 || backtestStrategies.some((strategy) => strategy.feedIds.length === 0) || isRunningBacktest} type="submit">
-                {isRunningBacktest ? (backtestConfig.run_mode === 'COMPARE_ALL' ? 'Running 3 independent scenarios…' : 'Running bucketed C++ backtest…') : 'Run backtest'}
+                {isRunningBacktest ? (simpleBacktestConfig.run_mode === 'COMPARE_ALL' ? 'Running 3 independent scenarios…' : 'Running bucketed C++ backtest…') : 'Run backtest'}
               </button>
               {backtestElapsedMs !== null && <span aria-live="polite" className="backtest-elapsed-time">{isRunningBacktest ? 'Elapsed' : 'Run time'}: {backtestElapsedMs < 1000 ? `${Math.round(backtestElapsedMs)} ms` : `${(backtestElapsedMs / 1000).toFixed(2)} s`}</span>}
             </form>
@@ -2564,7 +2769,7 @@ function App() {
                     <div className="bucket-result-strategies">{bucket.strategies.map((strategy) => <span key={strategy.instanceId}>{strategy.name} <code>{strategy.instanceId}</code> · {strategy.orders.length} orders</span>)}</div>
                   </article>)}
                 </div>
-                <BacktestReport compare={compareBacktestReports} scenarios={resultScenarios} />
+                <BacktestReport benchmarkFiles={benchmarkFiles} compare={compareBacktestReports} scenarios={resultScenarios} />
               </section>
             )}
           </section>
@@ -2572,8 +2777,8 @@ function App() {
           <section className="home-view placeholder-view">
             <button aria-label="Back to Backtesting" className="back-link" onClick={() => navigateToPage('backtesting')} title="Back to Backtesting" type="button"><span aria-hidden="true">←</span></button>
             <div className="eyebrow">BACKTESTING</div>
-            <div className="simple-backtest-title-row"><h1>GridSearch</h1><button aria-label="Backtest settings" className="backtest-settings-button" onClick={openBacktestSettings} title="Backtest settings" type="button"><span aria-hidden="true">⚙</span></button></div>
-            <BacktestSettingsPanel draft={backtestSettingsDraft} error={backtestSettingsError} onCancel={() => { setBacktestSettingsDraft(backtestConfig); setBacktestSettingsError(''); setBacktestSettingsOpen(false) }} onChange={updateBacktestSettingsDraft} onSave={saveBacktestSettings} onToggle={openBacktestSettings} open={backtestSettingsOpen} />
+            <div className="simple-backtest-title-row"><h1>GridSearch</h1><button aria-label="GridSearch settings" className="backtest-settings-button" onClick={openGridSearchSettings} title="GridSearch settings" type="button"><span aria-hidden="true">⚙</span></button></div>
+            <GridSearchSettingsPanel onToggle={openGridSearchSettings} open={gridSearchSettingsOpen} settings={gridSearchConfig} />
             <span className="progress-badge">IN PROGRESS</span>
           </section>
         ) : isBuilder ? (
