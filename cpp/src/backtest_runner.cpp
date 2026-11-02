@@ -112,12 +112,23 @@ OHLCVEvent parse_ohlcv_row(const std::vector<std::string>& cells, const OhlcvCol
     if (cells.size() <= largest_column) throw std::runtime_error("Each market-data row must contain timestamp, open, high, low, close, and volume values.");
     OHLCVEvent bar;
     bar.ts = parse_timestamp(cells[columns.timestamp], unit, format);
-    bar.open = std::stod(cells[columns.open]);
-    bar.high = std::stod(cells[columns.high]);
-    bar.low = std::stod(cells[columns.low]);
-    bar.close = std::stod(cells[columns.close]);
-    bar.volume = std::stod(cells[columns.volume]);
-    account_currency_rate = cells.size() > 6 && !cells[6].empty() ? std::stod(cells[6]) : 1.0;
+    const auto number = [&cells](std::size_t column, const char* name) {
+        try {
+            std::size_t consumed = 0;
+            const double value = std::stod(cells[column], &consumed);
+            while (consumed < cells[column].size() && std::isspace(static_cast<unsigned char>(cells[column][consumed]))) ++consumed;
+            if (consumed != cells[column].size()) throw std::invalid_argument("trailing characters");
+            return value;
+        } catch (const std::exception&) {
+            throw std::runtime_error("column '" + std::string(name) + "' is not numeric (value '" + cells[column] + "').");
+        }
+    };
+    bar.open = number(columns.open, "open");
+    bar.high = number(columns.high, "high");
+    bar.low = number(columns.low, "low");
+    bar.close = number(columns.close, "close");
+    bar.volume = number(columns.volume, "volume");
+    account_currency_rate = cells.size() > 6 && !cells[6].empty() ? number(6, "conversion_rate") : 1.0;
     if (!std::isfinite(bar.open) || !std::isfinite(bar.high) || !std::isfinite(bar.low) ||
         !std::isfinite(bar.close) || !std::isfinite(bar.volume) ||
         !std::isfinite(account_currency_rate) || account_currency_rate <= 0.0) {
@@ -316,6 +327,12 @@ int main(int argc, char** argv) {
         const double initial_capital = std::stod(argv[argument_index++]);
         const double cost_bps = std::stod(argv[argument_index++]);
         const std::string allocation_mode = argv[argument_index++];
+        // Accept the earlier runner argument layout as well, so an already
+        // running local API process can continue to launch this newer binary.
+        std::string bucket_capital_mode = "SHARED";
+        if (std::string(argv[argument_index]) == "SHARED" || std::string(argv[argument_index]) == "INDEPENDENT") {
+            bucket_capital_mode = argv[argument_index++];
+        }
         const double fill_latency_seconds = std::stod(argv[argument_index++]);
         const auto direction_mode = parse_direction_mode(argv[argument_index++]);
         const auto bucket_count = static_cast<std::size_t>(std::stoull(argv[argument_index++]));
@@ -325,6 +342,9 @@ int main(int argc, char** argv) {
         if (allocation_mode == "SHARED") config.capital_allocation = CAPITAL_ALLOCATION_MODE::SHARED;
         else if (allocation_mode == "EQUAL_PER_STRATEGY") config.capital_allocation = CAPITAL_ALLOCATION_MODE::EQUAL_PER_STRATEGY;
         else throw std::invalid_argument("Unsupported capital allocation mode.");
+        if (bucket_capital_mode == "SHARED") config.bucket_capital_mode = BUCKET_CAPITAL_MODE::SHARED;
+        else if (bucket_capital_mode == "INDEPENDENT") config.bucket_capital_mode = BUCKET_CAPITAL_MODE::INDEPENDENT;
+        else throw std::invalid_argument("Unsupported bucket capital mode.");
         config.fill_latency_seconds = fill_latency_seconds;
         config.direction_mode = direction_mode;
 

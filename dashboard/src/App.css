@@ -370,8 +370,8 @@ code { color: #b8d8fa; }
 .config-section-heading > span { color: #879099; font-size: .76rem; }
 .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 10px 13px; }
 .strategy-parameter-groups { display: grid; gap: 12px; }
-.strategy-parameter-group { min-width: 0; }
-.strategy-parameter-group > h4 { margin: 0 0 8px; color: #aab3bb; font-size: .76rem; font-weight: 600; }
+.strategy-parameter-group { min-width: 0; padding: 11px; border: 1px solid #30363c; border-radius: 7px; background: #0e1012; }
+.strategy-parameter-group > h4 { margin: 0 0 9px; color: #aab3bb; font-size: .72rem; font-weight: 650; letter-spacing: .045em; text-transform: uppercase; }
 .config-field { display: grid; gap: 5px; color: #c5cbd0; font-size: .76rem; }
 .config-field input, .config-field select { width: 100%; min-height: 34px; padding: 7px 9px; border: 1px solid #353b42; border-radius: 5px; outline: none; color: #edf0f2; background: #0c0e10; font-size: .82rem; }
 .config-field input:focus, .config-field select:focus { border-color: #63a8ee; box-shadow: 0 0 0 3px rgb(99 168 238 / 12%); }
@@ -434,6 +434,27 @@ code { color: #b8d8fa; }
 .report-tabs button { border: 1px solid transparent; border-radius: 5px; padding: 7px 10px; color: #89939c; background: transparent; font-size: .74rem; }
 .report-tabs button:hover { color: #dfe5ea; background: #1a1e22; }
 .report-tabs button.is-active { border-color: #33404a; color: #dce8f1; background: #1b242c; }
+.performance-subtabs { display: flex; gap: 5px; margin: 10px 0; padding-bottom: 7px; border-bottom: 1px solid #292e33; }
+.performance-subtabs button { border: 1px solid transparent; border-radius: 4px; padding: 5px 9px; color: #929da5; background: transparent; font-size: .7rem; cursor: pointer; }
+.performance-subtabs button.is-active { border-color: #3a4148; color: #e5ebef; background: #20252a; }
+.bucket-performance-scenarios, .bucket-correlation-scenarios { display: grid; gap: 18px; margin-top: 12px; }
+.bucket-performance-scenario { display: grid; gap: 9px; }
+.bucket-performance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); gap: 10px; }
+.bucket-performance-card { min-width: 0; padding: 11px; border: 1px solid #2d3339; border-radius: 6px; background: #0d0f11; }
+.bucket-performance-card-heading, .bucket-correlation-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.bucket-performance-card-heading h4, .bucket-correlation-heading h3 { margin: 0; color: #e2e8ec; font-size: .8rem; }
+.bucket-performance-card-heading span, .bucket-correlation-heading p { margin: 3px 0 0; color: #87929a; font-size: .66rem; }
+.bucket-performance-card .report-metric-grid { margin-bottom: 10px; }
+.bucket-performance-card .equity-chart-card { padding: 8px; }
+.bucket-correlation-heading label { display: flex; align-items: center; gap: 7px; color: #aab3bb; font-size: .68rem; }
+.bucket-correlation-heading select { padding: 5px 7px; border: 1px solid #394149; border-radius: 4px; color: #dce2e7; background: #111417; font-size: .68rem; }
+.bucket-correlation-section { margin: 12px 0; }
+.bucket-correlation-section h4 { margin: 0 0 6px; color: #b7c1c8; font-size: .74rem; }
+.bucket-correlation-table-wrap { max-width: 100%; overflow-x: auto; }
+.bucket-correlation-table { border-collapse: separate; border-spacing: 2px; font-size: .69rem; }
+.bucket-correlation-table th { min-width: 78px; padding: 6px; color: #aab4bc; background: #171b1f; text-align: left; }
+.bucket-correlation-table td { min-width: 64px; padding: 7px; border-radius: 3px; font-variant-numeric: tabular-nums; text-align: center; }
+.bucket-regression-table { margin-top: 8px; }
 .trade-visualize-button { border: 1px solid #357bbb; border-radius: 4px; padding: 4px 8px; color: #d9edff; background: #164b78; font-size: .68rem; cursor: pointer; }
 .trade-visualize-button:hover { border-color: #68b5ff; background: #1b6098; }
 .trade-visualizer { margin-top: 12px; padding: 12px; border: 1px solid #30363d; border-radius: 7px; background: #0d0f11; }

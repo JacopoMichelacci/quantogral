@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <cmath>
+#include <cctype>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -38,6 +40,32 @@ inline void register_strategy(StrategyDefinition definition) {
 inline std::string value_or(const StrategyValues& values, std::string_view key, std::string fallback) {
     const auto found = values.find(std::string(key));
     return found == values.end() ? std::move(fallback) : found->second;
+}
+
+inline double parse_number_value(const StrategyValues& values, std::string_view key, std::string fallback) {
+    const auto text = value_or(values, key, std::move(fallback));
+    try {
+        std::size_t consumed = 0;
+        const double value = std::stod(text, &consumed);
+        while (consumed < text.size() && std::isspace(static_cast<unsigned char>(text[consumed]))) ++consumed;
+        if (consumed != text.size() || !std::isfinite(value)) throw std::invalid_argument("invalid numeric value");
+        return value;
+    } catch (const std::exception&) {
+        throw std::invalid_argument("Strategy setting '" + std::string(key) + "' must be a finite number; got '" + text + "'.");
+    }
+}
+
+inline long long parse_integer_value(const StrategyValues& values, std::string_view key, std::string fallback) {
+    const auto text = value_or(values, key, std::move(fallback));
+    try {
+        std::size_t consumed = 0;
+        const auto value = std::stoll(text, &consumed);
+        while (consumed < text.size() && std::isspace(static_cast<unsigned char>(text[consumed]))) ++consumed;
+        if (consumed != text.size()) throw std::invalid_argument("invalid integer value");
+        return value;
+    } catch (const std::exception&) {
+        throw std::invalid_argument("Strategy setting '" + std::string(key) + "' must be an integer; got '" + text + "'.");
+    }
 }
 
 inline bool parse_bool_value(const StrategyValues& values, std::string_view key, bool fallback) {

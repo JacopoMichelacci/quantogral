@@ -155,6 +155,11 @@ enum class CAPITAL_ALLOCATION_MODE {
     EQUAL_PER_STRATEGY,
 };
 
+enum class BUCKET_CAPITAL_MODE {
+    SHARED,
+    INDEPENDENT,
+};
+
 enum class TRADE_DIRECTION_MODE {
     BOTH,
     LONG_ONLY,
@@ -166,6 +171,7 @@ struct BacktestConfig {
     double cost_bps = 3.0;
     std::string currency = "USD";
     CAPITAL_ALLOCATION_MODE capital_allocation = CAPITAL_ALLOCATION_MODE::SHARED;
+    BUCKET_CAPITAL_MODE bucket_capital_mode = BUCKET_CAPITAL_MODE::SHARED;
     double fill_latency_seconds = 0.0;
     TRADE_DIRECTION_MODE direction_mode = TRADE_DIRECTION_MODE::BOTH;
 };
@@ -533,6 +539,55 @@ public:
         if (plan.buckets.empty()) throw std::invalid_argument("A backtest plan needs at least one bucket.");
         BacktestRunResults output;
         output.buckets.reserve(plan.buckets.size());
+        if (config_.bucket_capital_mode == BUCKET_CAPITAL_MODE::INDEPENDENT) {
+            std::unordered_set<std::string> independent_bucket_ids;
+            std::unordered_set<std::string> independent_feed_ids;
+            for (const auto& bucket : plan.buckets) {
+                if (bucket.id.empty() || !independent_bucket_ids.insert(bucket.id).second) {
+                    throw std::invalid_argument("Bucket IDs in a backtest plan must be non-empty and unique.");
+                }
+                if (bucket.feeds.empty() || bucket.strategies.empty()) {
+                    throw std::invalid_argument("Every backtest bucket needs at least one feed and one strategy.");
+                }
+                for (const auto& feed : bucket.feeds) {
+                    if (feed.id.empty() || !independent_feed_ids.insert(feed.id).second) {
+                        throw std::invalid_argument("Feed IDs must be non-empty and unique across all backtest buckets.");
+                    }
+                }
+            }
+            const double bucket_initial_capital = config_.initial_capital / static_cast<double>(plan.buckets.size());
+            std::vector<std::size_t> curve_indices(plan.buckets.size(), 0);
+            std::vector<long long> portfolio_timestamps;
+            for (std::size_t i = 0; i < plan.buckets.size(); ++i) {
+                auto bucket_config = config_;
+                bucket_config.initial_capital = bucket_initial_capital;
+                bucket_config.bucket_capital_mode = BUCKET_CAPITAL_MODE::SHARED;
+                Backtester<Tin> bucket_backtester(bucket_config);
+                auto bucket_result = bucket_backtester.run(plan.buckets[i]);
+                bucket_result.contribution_curve.reserve(bucket_result.equity_curve.size());
+                for (const auto equity : bucket_result.equity_curve) {
+                    bucket_result.contribution_curve.push_back(equity - bucket_initial_capital);
+                }
+                bucket_result.contribution_timestamps = bucket_result.equity_timestamps;
+                portfolio_timestamps.insert(portfolio_timestamps.end(), bucket_result.equity_timestamps.begin(), bucket_result.equity_timestamps.end());
+                output.buckets.push_back(std::move(bucket_result));
+            }
+            std::sort(portfolio_timestamps.begin(), portfolio_timestamps.end());
+            portfolio_timestamps.erase(std::unique(portfolio_timestamps.begin(), portfolio_timestamps.end()), portfolio_timestamps.end());
+            output.equity_timestamps = portfolio_timestamps;
+            output.equity_curve.reserve(portfolio_timestamps.size());
+            for (const auto timestamp : portfolio_timestamps) {
+                double portfolio_equity = 0.0;
+                for (std::size_t bucket_index = 0; bucket_index < output.buckets.size(); ++bucket_index) {
+                    const auto& bucket_result = output.buckets[bucket_index];
+                    auto& curve_index = curve_indices[bucket_index];
+                    while (curve_index < bucket_result.equity_timestamps.size() && bucket_result.equity_timestamps[curve_index] <= timestamp) ++curve_index;
+                    portfolio_equity += curve_index == 0 ? bucket_initial_capital : bucket_result.equity_curve[curve_index - 1];
+                }
+                output.equity_curve.push_back(portfolio_equity);
+            }
+            return output;
+        }
         std::unordered_set<std::string> bucket_ids;
         std::unordered_set<std::string> feed_ids;
         BacktestBucket<Tin> portfolio_bucket{.id = "__portfolio__"};

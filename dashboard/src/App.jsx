@@ -151,12 +151,13 @@ function loadBacktestSettings() {
       cost_bps: Number.isFinite(Number(saved.cost_bps)) ? Number(saved.cost_bps) : 0,
       fill_latency_seconds: Number.isFinite(Number(saved.fill_latency_seconds)) ? Number(saved.fill_latency_seconds) : 0,
       capital_allocation: saved.capital_allocation === 'EQUAL_PER_STRATEGY' ? 'EQUAL_PER_STRATEGY' : 'SHARED',
+      bucket_capital_mode: saved.bucket_capital_mode === 'INDEPENDENT' ? 'INDEPENDENT' : 'SHARED',
       run_mode: ['BOTH', 'LONG_ONLY', 'SHORT_ONLY', 'COMPARE_ALL'].includes(saved.run_mode) ? saved.run_mode : 'BOTH',
       base_currency: /^[A-Z]{3}$/.test(saved.base_currency) ? saved.base_currency : 'USD',
       ignore_currency: Boolean(saved.ignore_currency),
     }
   } catch {
-    return { initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', run_mode: 'BOTH', base_currency: 'USD', ignore_currency: false }
+    return { initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', bucket_capital_mode: 'SHARED', run_mode: 'BOTH', base_currency: 'USD', ignore_currency: false }
   }
 }
 
@@ -471,7 +472,8 @@ function BacktestSettingsPanel({ open, draft, error, onToggle, onChange, onSave,
           <label className="config-field"><span>Total starting capital</span><input min="0.01" onChange={(event) => onChange('initial_capital', event.target.value)} step="1000" type="number" value={draft.initial_capital} /></label>
           <label className="config-field"><span>Transaction cost (bps)</span><input min="0" onChange={(event) => onChange('cost_bps', event.target.value)} step="0.1" type="number" value={draft.cost_bps} /></label>
           <label className="config-field"><span>Fill latency (seconds)</span><input min="0" onChange={(event) => onChange('fill_latency_seconds', event.target.value)} step="0.001" type="number" value={draft.fill_latency_seconds} /><small>Used for quote/tick data. OHLCV backtests fill at the next bar open.</small></label>
-          <label className="config-field"><span>Capital allocation</span><select onChange={(event) => onChange('capital_allocation', event.target.value)} value={draft.capital_allocation}><option value="SHARED">Shared across all strategies</option><option value="EQUAL_PER_STRATEGY">Split evenly across all strategies</option></select></label>
+          <label className="config-field"><span>Bucket capital</span><select onChange={(event) => onChange('bucket_capital_mode', event.target.value)} value={draft.bucket_capital_mode || 'SHARED'}><option value="SHARED">Shared portfolio across buckets</option><option value="INDEPENDENT">Independent buckets · split capital evenly</option></select><small>Independent mode divides total starting capital equally between buckets; each bucket trades only its own allocation.</small></label>
+          <label className="config-field"><span>Strategy capital allocation</span><select onChange={(event) => onChange('capital_allocation', event.target.value)} value={draft.capital_allocation}><option value="SHARED">Shared available capital</option><option value="EQUAL_PER_STRATEGY">Split evenly among strategies</option></select><small>In independent bucket mode, the split applies within each bucket; otherwise it applies across the whole portfolio.</small></label>
           <label className="config-field"><span>Trade directions</span><select onChange={(event) => onChange('run_mode', event.target.value)} value={draft.run_mode}><option value="BOTH">Long and short</option><option value="LONG_ONLY">Long only</option><option value="SHORT_ONLY">Short only</option><option value="COMPARE_ALL">Compare all three</option></select><small>Compare runs Long and short, Long only, and Short only independently.</small></label>
           <label className="config-field"><span>Portfolio currency</span><SearchableSelect ariaLabel="portfolio currency" onChange={(value) => onChange('base_currency', value)} options={CURRENCY_OPTIONS} placeholder="Search currencies…" value={draft.base_currency || 'USD'} /><small>Currency used for account cash and portfolio reporting.</small></label>
           <label className="config-toggle"><input checked={Boolean(draft.ignore_currency)} onChange={(event) => onChange('ignore_currency', event.target.checked)} type="checkbox" /><span>Ignore currency conversion</span></label>
@@ -862,8 +864,100 @@ function TradeVisualizer({ seriesOptions, onClose, focusedTrade }) {
   </section>
 }
 
+function bucketCorrelationData(buckets, frequency) {
+  const interval = frequency === 'hourly' ? 3_600_000 : 86_400_000
+  const periods = [...new Set(buckets.flatMap((bucket) => (bucket.equityTimestamps || []).map((timestamp) => Math.floor(timestamp / interval))))].sort((left, right) => left - right)
+  const series = buckets.map((bucket) => {
+    const initial = bucket.metrics?.initialEquity || 0
+    const byPeriod = new Map()
+    ;(bucket.equityTimestamps || []).forEach((timestamp, index) => byPeriod.set(Math.floor(timestamp / interval), bucket.equityCurve?.[index] ?? initial))
+    const activePeriods = [...byPeriod.keys()]
+    const firstPeriod = activePeriods.length ? Math.min(...activePeriods) : Infinity
+    const lastPeriod = activePeriods.length ? Math.max(...activePeriods) : -Infinity
+    let current = initial
+    let peak = initial
+    let previous = initial
+    const values = periods.map((period) => {
+      if (byPeriod.has(period)) current = byPeriod.get(period)
+      peak = Math.max(peak, current)
+      const active = period >= firstPeriod && period <= lastPeriod
+      const point = { period, equity: current, drawdownPct: active && peak > 0 ? (current / peak - 1) * 100 : null, drawdownDollars: active ? current - peak : null, returnPct: active && previous > 0 ? (current / previous - 1) * 100 : null }
+      previous = current
+      return point
+    })
+    return { bucket, initial, values, returns: values.map((point) => point.returnPct), drawdowns: values.map((point) => point.drawdownPct) }
+  })
+  const portfolioValues = periods.map((_, index) => series.reduce((total, item) => total + (item.values[index]?.equity ?? item.initial), 0))
+  const portfolioReturns = portfolioValues.map((value, index) => {
+    const previous = index === 0 ? series.reduce((total, item) => total + item.initial, 0) : portfolioValues[index - 1]
+    return previous > 0 ? (value / previous - 1) * 100 : 0
+  })
+  const correlation = (left, right) => {
+    if (left.length < 2 || left.length !== right.length) return null
+    const pairs = left.flatMap((value, index) => Number.isFinite(value) && Number.isFinite(right[index]) ? [[value, right[index]]] : [])
+    if (pairs.length < 2) return null
+    const leftMean = pairs.reduce((sum, [value]) => sum + value, 0) / pairs.length
+    const rightMean = pairs.reduce((sum, [, value]) => sum + value, 0) / pairs.length
+    let covariance = 0
+    let leftVariance = 0
+    let rightVariance = 0
+    for (const [leftValue, rightValue] of pairs) {
+      const leftDelta = leftValue - leftMean
+      const rightDelta = rightValue - rightMean
+      covariance += leftDelta * rightDelta
+      leftVariance += leftDelta * leftDelta
+      rightVariance += rightDelta * rightDelta
+    }
+    return leftVariance > 0 && rightVariance > 0 ? covariance / Math.sqrt(leftVariance * rightVariance) : null
+  }
+  const regressions = series.map((item) => {
+    const pairs = item.returns.flatMap((value, index) => Number.isFinite(value) && Number.isFinite(portfolioReturns[index]) ? [[value, portfolioReturns[index]]] : [])
+    const beta = pairs.length > 1 ? (() => {
+      const bucketMean = pairs.reduce((sum, [value]) => sum + value, 0) / pairs.length
+      const benchmarkMean = pairs.reduce((sum, [, value]) => sum + value, 0) / pairs.length
+      const covariance = pairs.reduce((sum, [bucketValue, benchmarkValue]) => sum + (benchmarkValue - benchmarkMean) * (bucketValue - bucketMean), 0)
+      const variance = pairs.reduce((sum, [, value]) => sum + (value - benchmarkMean) ** 2, 0)
+      return variance > 0 ? covariance / variance : null
+    })() : null
+    const bucketMean = pairs.length ? pairs.reduce((sum, [value]) => sum + value, 0) / pairs.length : 0
+    const benchmarkMean = pairs.length ? pairs.reduce((sum, [, value]) => sum + value, 0) / pairs.length : 0
+    const alpha = beta == null ? null : bucketMean - beta * benchmarkMean
+    const r = correlation(item.returns, portfolioReturns)
+    return { alpha, beta, rSquared: r == null ? null : r * r }
+  })
+  return { periods, series, portfolioReturns, regressions, correlation }
+}
+
+function correlationCellStyle(value) {
+  if (!Number.isFinite(value)) return { background: '#272c31', color: '#8d979f' }
+  const strength = Math.min(0.55, 0.12 + Math.abs(value) * 0.43)
+  return value >= 0
+    ? { background: `rgba(54, 160, 113, ${strength})`, color: '#e5f7ee' }
+    : { background: `rgba(204, 83, 93, ${strength})`, color: '#ffeaec' }
+}
+
+function BucketCorrelationMatrix({ scenario, frequency, onFrequencyChange }) {
+  const data = bucketCorrelationData(scenario.buckets || [], frequency)
+  const renderMatrix = (title, valuesKey) => <section className="bucket-correlation-section"><h4>{title}</h4><div className="bucket-correlation-table-wrap"><table className="bucket-correlation-table"><thead><tr><th></th>{data.series.map(({ bucket }) => <th key={bucket.id}>{bucket.id}</th>)}</tr></thead><tbody>{data.series.map((row, rowIndex) => <tr key={row.bucket.id}><th>{row.bucket.id}</th>{data.series.map((column, columnIndex) => { const value = rowIndex === columnIndex ? 1 : data.correlation(row[valuesKey], column[valuesKey]); return <td key={column.bucket.id} style={correlationCellStyle(value)}>{Number.isFinite(value) ? value.toFixed(2) : '—'}</td> })}</tr>)}</tbody></table></div></section>
+  return <div className="bucket-correlation-view">
+    <div className="bucket-correlation-heading"><div><h3>Bucket correlation · {scenario.scenarioLabel}</h3><p>Returns and drawdown are sampled at each UTC interval close; missing intervals carry the last equity forward.</p></div><label>Aggregation<select onChange={(event) => onFrequencyChange(event.target.value)} value={frequency}><option value="daily">Daily</option><option value="hourly">Hourly</option></select></label></div>
+    {!data.series.length || data.periods.length < 2 ? <p className="input-help">Not enough bucket equity history to calculate correlations.</p> : <>
+      {renderMatrix('Equity return correlation', 'returns')}
+      {renderMatrix('Drawdown level correlation', 'drawdowns')}
+      <p className="input-help">Regression values compare each bucket’s interval returns with the combined portfolio returns. Alpha is the per-interval intercept; beta is sensitivity to the portfolio; R² is the share of return variation explained by it.</p>
+      <div className="orders-table-wrap"><table className="orders-table bucket-regression-table"><thead><tr><th>Bucket</th><th>Alpha / interval</th><th>Beta</th><th>R²</th></tr></thead><tbody>{data.series.map(({ bucket }, index) => <tr key={bucket.id}><td>{bucket.id}</td><td>{reportNumber(data.regressions[index]?.alpha, '%', 4)}</td><td>{reportNumber(data.regressions[index]?.beta, '', 4)}</td><td>{reportNumber(data.regressions[index]?.rSquared, '', 4)}</td></tr>)}</tbody></table></div>
+    </>}
+  </div>
+}
+
+function BucketPerformanceView({ scenarios, currency }) {
+  return <div className="bucket-performance-scenarios">{scenarios.map((scenario) => <section className="bucket-performance-scenario" key={scenario.scenarioId}><div className="config-section-heading"><h3>{scenario.scenarioLabel} · bucket performance</h3><span>Each bucket uses its own equal share of total starting capital</span></div><div className="bucket-performance-grid">{(scenario.buckets || []).map((bucket) => <article className="bucket-performance-card" key={bucket.id}><div className="bucket-performance-card-heading"><h4>{bucket.id}</h4><span>{bucket.feeds?.length || 0} feeds · {bucket.strategies?.length || 0} strategies</span></div><div className="report-metric-grid"><div><span>Profit</span><strong>{reportNumber(bucket.metrics?.profitPct, '%')}</strong></div><div><span>Maximum drawdown</span><strong>{reportMoney(bucket.metrics?.maxDrawdownDollars, currency)} · {reportNumber(bucket.metrics?.maxDrawdownPct, '%')}</strong></div><div><span>Sharpe</span><strong>{reportNumber(bucket.metrics?.sharpe, '', 4)}</strong></div><div><span>Trades / year</span><strong>{reportNumber(bucket.metrics?.tradesPerYear)}</strong></div></div><EquityCurveChart currency={currency} scenarios={[{ scenarioId: bucket.id, scenarioLabel: bucket.id, metrics: bucket.metrics, equityCurve: bucket.equityCurve || [], equityTimestamps: bucket.equityTimestamps || [] }]} /></article>)}</div></section>)}</div>
+}
+
 function BacktestReport({ scenarios, compare }) {
   const [activeTab, setActiveTab] = useState('general')
+  const [performanceView, setPerformanceView] = useState('portfolio')
+  const [correlationFrequency, setCorrelationFrequency] = useState('daily')
   const [detailScenarioId, setDetailScenarioId] = useState(scenarios[0]?.scenarioId || 'both')
   const [visualizeSeries, setVisualizeSeries] = useState(false)
   const [activeMetricHelp, setActiveMetricHelp] = useState(null)
@@ -941,7 +1035,12 @@ function BacktestReport({ scenarios, compare }) {
         <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('general')}</div>
       </>}
       {activeTab === 'performance' && <>
-        <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div>
+        {detailScenario.bucketCapitalMode === 'INDEPENDENT' && <nav aria-label="Performance views" className="performance-subtabs">
+          {[['portfolio', 'Portfolio'], ['buckets', 'Buckets'], ['correlation', 'Correlation']].map(([id, label]) => <button aria-pressed={performanceView === id} className={performanceView === id ? 'is-active' : ''} key={id} onClick={() => setPerformanceView(id)} type="button">{label}</button>)}
+        </nav>}
+        {detailScenario.bucketCapitalMode !== 'INDEPENDENT' || performanceView === 'portfolio' ? <div className={`report-scenario-grid ${scenarios.length === 1 ? 'is-single' : ''}`}>{scenarioMetricCards('performance')}</div> : null}
+        {detailScenario.bucketCapitalMode === 'INDEPENDENT' && performanceView === 'buckets' && <BucketPerformanceView currency={currency} scenarios={scenarios} />}
+        {detailScenario.bucketCapitalMode === 'INDEPENDENT' && performanceView === 'correlation' && <div className="bucket-correlation-scenarios">{scenarios.map((scenario) => <BucketCorrelationMatrix frequency={correlationFrequency} key={scenario.scenarioId} onFrequencyChange={setCorrelationFrequency} scenario={scenario} />)}</div>}
       </>}
       {activeTab === 'trades' && visualizeSeries ? <TradeVisualizer key={`${detailScenario.scenarioId}:${visualizeSeries.bucketId || 'all'}:${visualizeSeries.instanceId || 'all'}`} focusedTrade={visualizeSeries === true ? null : visualizeSeries} onClose={() => setVisualizeSeries(false)} seriesOptions={tradeSeriesOptions} /> : activeTab === 'trades' && <>
         {tradeSeriesOptions.length > 0 && <div className="trade-series-actions"><span>{detailScenario.trades.length.toLocaleString()} completed trades across {tradeSeriesOptions.length.toLocaleString()} data series</span><button className="trade-visualize-button" onClick={() => setVisualizeSeries(true)} type="button">Visualize series</button></div>}
@@ -1157,7 +1256,7 @@ function App() {
   const [backtestElapsedMs, setBacktestElapsedMs] = useState(null)
   const backtestStartedAt = useRef(null)
   const [backtestSettingsOpen, setBacktestSettingsOpen] = useState(false)
-  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', base_currency: 'USD', ignore_currency: false })
+  const [backtestSettingsDraft, setBacktestSettingsDraft] = useState({ initial_capital: 100000, cost_bps: 0, fill_latency_seconds: 0, capital_allocation: 'SHARED', bucket_capital_mode: 'SHARED', base_currency: 'USD', ignore_currency: false })
   const [backtestConfig, setBacktestConfig] = useState(loadBacktestSettings)
   const [yahooTicker, setYahooTicker] = useState('')
   const [selectedYahooInstruments, setSelectedYahooInstruments] = useState([])
@@ -1629,6 +1728,7 @@ function App() {
       cost_bps: Number(backtestSettingsDraft.cost_bps),
       fill_latency_seconds: Number(backtestSettingsDraft.fill_latency_seconds),
       capital_allocation: backtestSettingsDraft.capital_allocation,
+      bucket_capital_mode: backtestSettingsDraft.bucket_capital_mode || 'SHARED',
       run_mode: backtestSettingsDraft.run_mode,
       base_currency: backtestSettingsDraft.base_currency,
       ignore_currency: Boolean(backtestSettingsDraft.ignore_currency),
@@ -2449,11 +2549,18 @@ function App() {
                     <div className="config-section-heading"><h3>{backtestBuckets.find((item) => item.id === bucket.id)?.name || bucket.id}</h3><span>{bucket.strategies.length} strategies · {bucket.feeds.length} feeds</span></div>
                     <div className="bucket-result-details">
                       <span>Orders <strong>{bucket.metrics.orders.toLocaleString()}</strong></span>
-                      <span>Profit contribution <strong>{reportNumber(bucket.metrics.profitContributionPct, '%')}</strong></span>
-                      <span>Sharpe contribution <strong>{reportNumber(bucket.metrics.contributionSharpe, '', 4)}</strong></span>
+                      {activeBacktestReport.bucketCapitalMode === 'INDEPENDENT' ? <>
+                        <span>Equity <strong>{reportMoney(bucket.metrics.finalEquity, activeBacktestReport.metrics.currency || 'USD')}</strong></span>
+                        <span>Profit <strong>{reportNumber(bucket.metrics.profitPct, '%')}</strong></span>
+                        <span>Maximum DD <strong>{reportNumber(bucket.metrics.maxDrawdownPct, '%')}</strong></span>
+                        <span>Sharpe <strong>{reportNumber(bucket.metrics.sharpe, '', 4)}</strong></span>
+                      </> : <>
+                        <span>Profit contribution <strong>{reportNumber(bucket.metrics.profitContributionPct, '%')}</strong></span>
+                        <span>Sharpe contribution <strong>{reportNumber(bucket.metrics.contributionSharpe, '', 4)}</strong></span>
+                      </>}
                       <span>Trades / year <strong>{reportNumber(bucket.metrics.tradesPerYear)}</strong></span>
                     </div>
-                    <p className="bucket-contribution-note">Contribution to the shared portfolio; profit % uses total starting capital.</p>
+                    <p className="bucket-contribution-note">{activeBacktestReport.bucketCapitalMode === 'INDEPENDENT' ? 'Independent account funded with an equal share of total starting capital.' : 'Contribution to the shared portfolio; profit % uses total starting capital.'}</p>
                     <div className="bucket-result-strategies">{bucket.strategies.map((strategy) => <span key={strategy.instanceId}>{strategy.name} <code>{strategy.instanceId}</code> · {strategy.orders.length} orders</span>)}</div>
                   </article>)}
                 </div>

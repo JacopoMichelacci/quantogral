@@ -30,6 +30,7 @@ DEFAULT_BACKTEST_SETTINGS = {
     "cost_bps": 0,
     "fill_latency_seconds": 0,
     "capital_allocation": "SHARED",
+    "bucket_capital_mode": "SHARED",
     "run_mode": "BOTH",
     "base_currency": "USD",
     "ignore_currency": False,
@@ -215,8 +216,8 @@ def write_generated_registry(headers: list[Path]) -> None:
             if item["type"] == "boolean":
                 factory.append(f'    config.{cpp_path} = quantogral::parse_bool_value(values, "{key}", {"true" if item["default"] else "false"});')
             elif item["type"] == "number":
-                parse_fn = "std::stod" if any(t in cpp_type for t in ("float", "double")) else "std::stoll"
-                factory.append(f'    config.{cpp_path} = static_cast<decltype(config.{cpp_path})>({parse_fn}(quantogral::value_or(values, "{key}", "{item["default"]}")));')
+                parse_fn = "parse_number_value" if any(t in cpp_type for t in ("float", "double")) else "parse_integer_value"
+                factory.append(f'    config.{cpp_path} = static_cast<decltype(config.{cpp_path})>(quantogral::{parse_fn}(values, "{key}", "{item["default"]}"));')
             elif item["type"] == "text":
                 factory.append(f'    config.{cpp_path} = quantogral::value_or(values, "{key}", {json.dumps(item["default"])});')
             else:
@@ -286,6 +287,8 @@ def read_config() -> tuple[dict[str, Any], bool]:
         backtest = dict(DEFAULT_BACKTEST_SETTINGS)
     if saved_backtest.get("capital_allocation") in {"SHARED", "EQUAL_PER_STRATEGY"}:
         backtest["capital_allocation"] = saved_backtest["capital_allocation"]
+    if saved_backtest.get("bucket_capital_mode") in {"SHARED", "INDEPENDENT"}:
+        backtest["bucket_capital_mode"] = saved_backtest["bucket_capital_mode"]
     if saved_backtest.get("run_mode") in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
         backtest["run_mode"] = saved_backtest["run_mode"]
     base_currency = saved_backtest.get("base_currency")
@@ -1053,12 +1056,15 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     allocation_mode = value(backtest, "capital_allocation", "SHARED")
     if allocation_mode not in {"SHARED", "EQUAL_PER_STRATEGY"}:
         raise ValueError("Capital allocation must be SHARED or EQUAL_PER_STRATEGY.")
+    bucket_capital_mode = value(backtest, "bucket_capital_mode", "SHARED")
+    if bucket_capital_mode not in {"SHARED", "INDEPENDENT"}:
+        raise ValueError("Bucket capital mode must be SHARED or INDEPENDENT.")
     run_mode = value(backtest, "run_mode", "BOTH")
     if run_mode not in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
         raise ValueError("Choose Long and short, Long only, Short only, or Compare all.")
     strategy_catalog = {item["id"]: item for item in strategy_catalog_from_headers()}
 
-    arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, str(fill_latency_seconds), "BOTH", str(len(buckets))]
+    arguments = [str(RUNNER_BINARY), "--run-plan", str(initial_capital), str(cost_bps), allocation_mode, bucket_capital_mode, str(fill_latency_seconds), "BOTH", str(len(buckets))]
     temp_dirs: list[Any] = []
     prepared_buckets: list[dict[str, Any]] = []
     fx_rate_cache: dict[tuple[str, str, str, str, str], tuple[list[tuple[int, float]], str, int]] = {}
@@ -1147,6 +1153,19 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 base = strategy.get("baseConfig", {})
                 params = strategy.get("parameters", {})
                 values = {**(base if isinstance(base, dict) else {}), **(params if isinstance(params, dict) else {})}
+                strategy_meta = strategy_catalog.get(strategy_id)
+                if strategy_meta is None:
+                    raise ValueError(f"Strategy {strategy_id} is not a supported OHLCV strategy.")
+                fields = {field["key"]: field for field in [*strategy_meta["baseConfig"], *strategy_meta["parameters"]]}
+                for key, item in values.items():
+                    field = fields.get(key)
+                    if field and field["type"] == "number":
+                        try:
+                            number = float(item)
+                        except (TypeError, ValueError):
+                            raise ValueError(f"Strategy {strategy_meta['name']} setting '{key}' must be a number.") from None
+                        if not math.isfinite(number):
+                            raise ValueError(f"Strategy {strategy_meta['name']} setting '{key}' must be a finite number.")
                 arguments.extend([instance_id, strategy_id, str(len(connected_feeds)), *connected_feeds, str(len(values))])
                 for key, item in values.items():
                     if not isinstance(key, str) or not key or "=" in key:
@@ -1154,9 +1173,6 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(item, bool):
                         item = str(item).lower()
                     arguments.append(f"{key}={item}")
-                strategy_meta = strategy_catalog.get(strategy_id)
-                if strategy_meta is None:
-                    raise ValueError(f"Strategy {strategy_id} is not a supported OHLCV strategy.")
                 prepared_strategies.append({"instanceId": instance_id, "strategyId": strategy_id, "name": strategy_meta["name"]})
             prepared_buckets.append({"id": bucket_id, "feeds": prepared_feeds, "strategies": prepared_strategies})
 
@@ -1173,7 +1189,10 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         raw_scenarios = []
         for scenario_id, scenario_label, direction_mode in scenario_specs:
             scenario_arguments = arguments.copy()
-            scenario_arguments[6] = direction_mode
+            # argv[6] is fill_latency_seconds; argv[7] is trade direction.
+            # Replacing index 6 made the C++ runner call stod("BOTH"), which
+            # surfaced to the UI as `stod: no conversion` on every run.
+            scenario_arguments[7] = direction_mode
             try:
                 result = subprocess.run(scenario_arguments, capture_output=True, text=True, timeout=300, check=False)
             except subprocess.TimeoutExpired as error:
@@ -1208,6 +1227,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                     orders.append({**order, "bucketId": bucket["id"], "instanceId": strategy["instanceId"], "strategyId": strategy["strategyId"], "strategyName": strategy["name"], "strategyTag": strategy["strategyTag"]})
             bucket["metrics"] = {"orders": sum(len(strategy.get("orders", [])) for strategy in bucket.get("strategies", []))}
         output["inputRows"] = int(output.get("inputRows", 0))
+        output["bucketCapitalMode"] = bucket_capital_mode
         output["buckets"] = output_buckets
         orders.sort(key=lambda order: (order["timestamp"], order["bucketId"], order["instanceId"], order["id"]))
         output["orders"] = orders
@@ -1282,6 +1302,48 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 sharpe = statistics.mean(daily_returns) / volatility * math.sqrt(252.0)
         elapsed_years = ((max(equity_timestamps) - min(equity_timestamps)) / 86_400_000.0 / 365.25) if len(equity_timestamps) > 1 else 0.0
         for bucket in output_buckets:
+            if bucket_capital_mode == "INDEPENDENT":
+                bucket_curve = bucket.get("equityCurve", [])
+                bucket_timestamps = bucket.get("equityTimestamps", [])
+                bucket_initial = initial_capital / max(1, len(output_buckets))
+                bucket_final = bucket_curve[-1] if bucket_curve else bucket_initial
+                bucket_peak = bucket_initial
+                bucket_max_dd = 0.0
+                bucket_max_dd_pct = 0.0
+                daily_bucket_equity: dict[Any, float] = {}
+                for timestamp, equity in zip(bucket_timestamps, bucket_curve):
+                    bucket_peak = max(bucket_peak, equity)
+                    bucket_max_dd = max(bucket_max_dd, bucket_peak - equity)
+                    if bucket_peak > 0:
+                        bucket_max_dd_pct = max(bucket_max_dd_pct, (bucket_peak - equity) / bucket_peak)
+                    day = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).date()
+                    daily_bucket_equity[day] = equity
+                bucket_returns = []
+                previous_bucket_equity = bucket_initial
+                for day in sorted(daily_bucket_equity):
+                    current_equity = daily_bucket_equity[day]
+                    if previous_bucket_equity > 0:
+                        bucket_returns.append(current_equity / previous_bucket_equity - 1.0)
+                    previous_bucket_equity = current_equity
+                bucket_sharpe = None
+                if len(bucket_returns) > 1:
+                    bucket_volatility = statistics.stdev(bucket_returns)
+                    if bucket_volatility > 0:
+                        bucket_sharpe = statistics.mean(bucket_returns) / bucket_volatility * math.sqrt(252.0)
+                bucket_years = ((max(bucket_timestamps) - min(bucket_timestamps)) / 86_400_000.0 / 365.25) if len(bucket_timestamps) > 1 else 0.0
+                bucket_trade_count = sum(1 for trade in closed_trades if trade["bucketId"] == bucket["id"])
+                bucket_profit = bucket_final - bucket_initial
+                bucket["metrics"].update({
+                    "initialEquity": bucket_initial, "finalEquity": bucket_final,
+                    "profitNotional": bucket_profit,
+                    "profitPct": (bucket_profit / bucket_initial * 100.0) if bucket_initial else 0.0,
+                    "maxDrawdownDollars": bucket_max_dd,
+                    "maxDrawdownPct": bucket_max_dd_pct * 100.0,
+                    "sharpe": bucket_sharpe,
+                    "profitContributionPct": bucket_profit / initial_capital * 100.0 if initial_capital else 0.0,
+                    "tradesPerYear": bucket_trade_count / bucket_years if bucket_years > 0 else None,
+                })
+                continue
             contribution_curve = bucket.get("contributionCurve", [])
             contribution_timestamps = bucket.get("contributionTimestamps", [])
             bucket_profit = contribution_curve[-1] if contribution_curve else 0.0
@@ -1581,6 +1643,9 @@ class ConfigHandler(BaseHTTPRequestHandler):
                 settings["capital_allocation"] = payload["capital_allocation"]
                 if settings["capital_allocation"] not in {"SHARED", "EQUAL_PER_STRATEGY"}:
                     raise ValueError("Choose a valid capital allocation mode.")
+                settings["bucket_capital_mode"] = payload["bucket_capital_mode"]
+                if settings["bucket_capital_mode"] not in {"SHARED", "INDEPENDENT"}:
+                    raise ValueError("Choose a valid bucket capital mode.")
                 settings["run_mode"] = payload["run_mode"]
                 if settings["run_mode"] not in {"BOTH", "LONG_ONLY", "SHORT_ONLY", "COMPARE_ALL"}:
                     raise ValueError("Choose a valid trade direction mode.")
