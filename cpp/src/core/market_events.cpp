@@ -10,7 +10,6 @@ std::ostream& operator<<(std::ostream& os, MKT_EVENT_TYPE type) {
     }
     return os;
 }
-
 std::ostream& operator<<(std::ostream& os, const OHLCVEvent& event) {
     return os << "| ohlcv_event(type: " << event.type
               << ", open: " << event.open

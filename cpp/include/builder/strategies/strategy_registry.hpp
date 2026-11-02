@@ -12,14 +12,14 @@
 
 #include "builder/strategies/strategy_base.hpp"
 
-// Build-generated adapters register OHLCV strategies here. Strategy headers
+// Build-generated adapters register FeedEvent strategies here. Strategy headers
 // only need a normal Config type and a constructor following the shared shape.
 namespace quantogral {
 using StrategyValues = std::unordered_map<std::string, std::string>;
 
 struct StrategyDefinition {
     std::string id;
-    std::unique_ptr<Strategy<OHLCVEvent>> (*create)(const StrategyValues&);
+    std::unique_ptr<Strategy<FeedEvent>> (*create)(const StrategyValues&);
 };
 
 inline std::vector<StrategyDefinition>& strategy_registry() {

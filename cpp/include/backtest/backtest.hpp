@@ -7,6 +7,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -109,7 +110,8 @@ struct BacktestEventTraits;
 
 template <>
 struct BacktestEventTraits<OHLCVEvent> {
-    static constexpr bool supports_fill_latency = false;
+    static constexpr bool supports_fill_latency(const OHLCVEvent&) { return false; }
+    static constexpr bool tradable(const OHLCVEvent&) { return true; }
     static long long timestamp(const OHLCVEvent& event) { return event.ts; }
     static bool valid(const OHLCVEvent& event) {
         return std::isfinite(event.open) && std::isfinite(event.high) && std::isfinite(event.low) &&
@@ -131,7 +133,8 @@ struct BacktestEventTraits<OHLCVEvent> {
 
 template <>
 struct BacktestEventTraits<QuoteEvent> {
-    static constexpr bool supports_fill_latency = true;
+    static constexpr bool supports_fill_latency(const QuoteEvent&) { return true; }
+    static constexpr bool tradable(const QuoteEvent&) { return true; }
     static long long timestamp(const QuoteEvent& event) { return event.ts; }
     static bool valid(const QuoteEvent& event) {
         return std::isfinite(event.bid) && std::isfinite(event.ask) &&
@@ -140,16 +143,71 @@ struct BacktestEventTraits<QuoteEvent> {
     }
     static double buy_price(const QuoteEvent& event) { return event.ask; }
     static double sell_price(const QuoteEvent& event) { return event.bid; }
-    static double mark_price(const QuoteEvent& event, double position, double) {
-        if (position > 0.0) return event.bid;
-        if (position < 0.0) return event.ask;
-        return (event.bid + event.ask) / 2.0;
+    static double mark_price(const QuoteEvent& event, double position, double account_currency_rate) {
+        if (position > 0.0) return event.bid * account_currency_rate;
+        if (position < 0.0) return event.ask * account_currency_rate;
+        return (event.bid + event.ask) / 2.0 * account_currency_rate;
     }
     static bool stop_hit(const QuoteEvent& event, SIGNAL side, double stop) {
         return side == SIGNAL::LONG ? event.bid <= stop : event.ask >= stop;
     }
     static double stop_fill_price(const QuoteEvent& event, SIGNAL side, double) {
         return side == SIGNAL::LONG ? event.bid : event.ask;
+    }
+};
+
+// Runtime policy for heterogeneous event streams. Known market events can
+// trade; other MarketEvent-derived types remain available to strategies as
+// informational events until they define an execution model.
+template <>
+struct BacktestEventTraits<FeedEvent> {
+    static long long timestamp(const FeedEvent& event) { return event.data.ts; }
+
+    static bool valid(const FeedEvent& event) {
+        if (const auto* bar = event.get_if<OHLCVEvent>()) return BacktestEventTraits<OHLCVEvent>::valid(*bar);
+        if (const auto* quote = event.get_if<QuoteEvent>()) return BacktestEventTraits<QuoteEvent>::valid(*quote);
+        return true;
+    }
+
+    static bool supports_fill_latency(const FeedEvent& event) {
+        if (const auto* quote = event.get_if<QuoteEvent>()) return BacktestEventTraits<QuoteEvent>::supports_fill_latency(*quote);
+        return false;
+    }
+
+    static bool tradable(const FeedEvent& event) {
+        if (const auto* bar = event.get_if<OHLCVEvent>()) return BacktestEventTraits<OHLCVEvent>::tradable(*bar);
+        if (const auto* quote = event.get_if<QuoteEvent>()) return BacktestEventTraits<QuoteEvent>::tradable(*quote);
+        return false;
+    }
+
+    static double buy_price(const FeedEvent& event) {
+        if (const auto* bar = event.get_if<OHLCVEvent>()) return BacktestEventTraits<OHLCVEvent>::buy_price(*bar);
+        if (const auto* quote = event.get_if<QuoteEvent>()) return BacktestEventTraits<QuoteEvent>::buy_price(*quote);
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    static double sell_price(const FeedEvent& event) {
+        if (const auto* bar = event.get_if<OHLCVEvent>()) return BacktestEventTraits<OHLCVEvent>::sell_price(*bar);
+        if (const auto* quote = event.get_if<QuoteEvent>()) return BacktestEventTraits<QuoteEvent>::sell_price(*quote);
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    static double mark_price(const FeedEvent& event, double position, double account_currency_rate) {
+        if (const auto* bar = event.get_if<OHLCVEvent>()) return BacktestEventTraits<OHLCVEvent>::mark_price(*bar, position, account_currency_rate);
+        if (const auto* quote = event.get_if<QuoteEvent>()) return BacktestEventTraits<QuoteEvent>::mark_price(*quote, position, account_currency_rate);
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    static bool stop_hit(const FeedEvent& event, SIGNAL side, double stop) {
+        if (const auto* bar = event.get_if<OHLCVEvent>()) return BacktestEventTraits<OHLCVEvent>::stop_hit(*bar, side, stop);
+        if (const auto* quote = event.get_if<QuoteEvent>()) return BacktestEventTraits<QuoteEvent>::stop_hit(*quote, side, stop);
+        return false;
+    }
+
+    static double stop_fill_price(const FeedEvent& event, SIGNAL side, double stop) {
+        if (const auto* bar = event.get_if<OHLCVEvent>()) return BacktestEventTraits<OHLCVEvent>::stop_fill_price(*bar, side, stop);
+        if (const auto* quote = event.get_if<QuoteEvent>()) return BacktestEventTraits<QuoteEvent>::stop_fill_price(*quote, side, stop);
+        return std::numeric_limits<double>::quiet_NaN();
     }
 };
 
@@ -208,8 +266,8 @@ public:
             throw std::invalid_argument("Fill latency must be a finite non-negative number of seconds.");
         }
         const auto fill_latency_ms = static_cast<long long>(std::ceil(config_.fill_latency_seconds * 1'000.0));
-        const auto eligible_timestamp = [fill_latency_ms](long long submitted_at) {
-            const auto delay = BacktestEventTraits<Tin>::supports_fill_latency ? fill_latency_ms : 0LL;
+        const auto eligible_timestamp = [fill_latency_ms](long long submitted_at, const Tin& source_event) {
+            const auto delay = BacktestEventTraits<Tin>::supports_fill_latency(source_event) ? fill_latency_ms : 0LL;
             if (delay > 0 && submitted_at > std::numeric_limits<long long>::max() - delay) {
                 throw std::overflow_error("Fill latency exceeds the supported timestamp range.");
             }
@@ -220,6 +278,10 @@ public:
         }
 
         std::unordered_map<std::string, std::size_t> feed_indices;
+        std::unordered_map<std::uint8_t, std::size_t> numeric_feed_indices;
+        std::unordered_map<std::uint8_t, std::string> numeric_feed_names;
+        std::vector<std::uint8_t> feed_main_ids(bucket.feeds.size(), 0);
+        std::vector<FeedRole> feed_roles(bucket.feeds.size(), FeedRole::MAIN);
         for (std::size_t i = 0; i < bucket.feeds.size(); ++i) {
             const auto& feed = bucket.feeds[i];
             if (feed.id.empty() || !feed_indices.emplace(feed.id, i).second) {
@@ -238,6 +300,46 @@ public:
                 if (!feed.account_currency_rates.empty() &&
                     (!std::isfinite(feed.account_currency_rates[j]) || feed.account_currency_rates[j] <= 0.0)) {
                     throw std::invalid_argument("Feed '" + feed.id + "' has an invalid backtester currency rate at event " + std::to_string(j + 1) + ".");
+                }
+                if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                    const auto& event = feed.events[j];
+                    if (j == 0) {
+                        feed_main_ids[i] = event.main_feed_id;
+                        feed_roles[i] = event.role;
+                        if (event.role != FeedRole::MAIN && event.role != FeedRole::SUB1 &&
+                            event.role != FeedRole::SUB2 && event.role != FeedRole::SUB3) {
+                            throw std::invalid_argument("Feed '" + feed.id + "' has an unsupported feed role.");
+                        }
+                        if ((event.role == FeedRole::MAIN && event.main_feed_id != event.feed_id) ||
+                            (event.role != FeedRole::MAIN && event.main_feed_id == event.feed_id)) {
+                            throw std::invalid_argument("Feed '" + feed.id + "' has an inconsistent Main/Sub relationship.");
+                        }
+                        if (!numeric_feed_indices.emplace(event.feed_id, i).second) {
+                            throw std::invalid_argument("Numeric feed IDs must be unique in a backtest bucket.");
+                        }
+                        numeric_feed_names.emplace(event.feed_id, feed.id);
+                    } else if (event.main_feed_id != feed_main_ids[i] || event.role != feed_roles[i] ||
+                               !numeric_feed_indices.contains(event.feed_id) || numeric_feed_indices.at(event.feed_id) != i) {
+                        throw std::invalid_argument("All events in feed '" + feed.id + "' must have the same feed ID, role, and Main ID.");
+                    }
+                }
+            }
+        }
+        if constexpr (std::is_same_v<Tin, FeedEvent>) {
+            for (std::size_t i = 0; i < bucket.feeds.size(); ++i) {
+                if (bucket.feeds[i].events.empty()) {
+                    throw std::invalid_argument("Feed '" + bucket.feeds[i].id + "' has no events.");
+                }
+                if (feed_roles[i] == FeedRole::MAIN) continue;
+                const auto main = numeric_feed_indices.find(feed_main_ids[i]);
+                if (main == numeric_feed_indices.end() || feed_roles[main->second] != FeedRole::MAIN) {
+                    throw std::invalid_argument("Subfeed '" + bucket.feeds[i].id + "' references an unknown Main feed.");
+                }
+                for (std::size_t other = i + 1; other < bucket.feeds.size(); ++other) {
+                    if (!bucket.feeds[other].events.empty() && feed_roles[other] == feed_roles[i] &&
+                        feed_main_ids[other] == feed_main_ids[i]) {
+                        throw std::invalid_argument("A Main feed cannot have more than one subfeed in the same slot.");
+                    }
                 }
             }
         }
@@ -269,6 +371,12 @@ public:
         std::vector<std::string> attribution_bucket_ids;
         std::unordered_map<std::string, std::size_t> attribution_bucket_indices;
         std::vector<double> attribution_initial_capital;
+        const auto subscribe_feed = [&](std::size_t strategy_index, std::size_t feed_index) {
+            if (subscribed_feeds[strategy_index].insert(feed_index).second) {
+                subscribers[feed_index].push_back(strategy_index);
+                subscription_order[strategy_index].push_back(feed_index);
+            }
+        };
 
         for (std::size_t strategy_index = 0; strategy_index < bucket.strategies.size(); ++strategy_index) {
             const auto& binding = bucket.strategies[strategy_index];
@@ -298,9 +406,23 @@ public:
                 if (feed == feed_indices.end()) {
                     throw std::invalid_argument("Strategy '" + binding.instance_id + "' references unknown feed '" + feed_id + "'.");
                 }
-                if (subscribed_feeds[strategy_index].insert(feed->second).second) {
-                    subscribers[feed->second].push_back(strategy_index);
-                    subscription_order[strategy_index].push_back(feed->second);
+                if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                    const auto selected_index = feed->second;
+                    if (feed_roles[selected_index] == FeedRole::MAIN) {
+                        subscribe_feed(strategy_index, selected_index);
+                        for (std::size_t candidate = 0; candidate < bucket.feeds.size(); ++candidate) {
+                            if (feed_roles[candidate] != FeedRole::MAIN &&
+                                feed_main_ids[candidate] == bucket.feeds[selected_index].events.front().feed_id) {
+                                subscribe_feed(strategy_index, candidate);
+                            }
+                        }
+                    } else {
+                        const auto main_index = numeric_feed_indices.at(feed_main_ids[selected_index]);
+                        subscribe_feed(strategy_index, main_index);
+                        subscribe_feed(strategy_index, selected_index);
+                    }
+                } else {
+                    subscribe_feed(strategy_index, feed->second);
                 }
             }
         }
@@ -354,6 +476,8 @@ public:
             if (!bucket.feeds[i].events.empty()) timeline.push({i, 0});
         }
         std::vector<const Tin*> latest_events(bucket.feeds.size(), nullptr);
+        std::vector<std::size_t> latest_event_indices(bucket.feeds.size(), std::numeric_limits<std::size_t>::max());
+        std::vector<std::unordered_map<std::uint8_t, StrategyContext::SubEventQueues>> pending_sub_events(bucket.strategies.size());
 
         while (!timeline.empty()) {
             const auto timestamp = BacktestEventTraits<Tin>::timestamp(bucket.feeds[timeline.top().feed_index].events[timeline.top().event_index]);
@@ -370,10 +494,16 @@ public:
 
             // Treat equal-timestamp updates as simultaneous: every subscriber sees
             // the complete as-of snapshot, independent of feed iteration order.
-            for (const auto& cursor : batch) latest_events[cursor.feed_index] = &bucket.feeds[cursor.feed_index].events[cursor.event_index];
+            for (const auto& cursor : batch) {
+                latest_events[cursor.feed_index] = &bucket.feeds[cursor.feed_index].events[cursor.event_index];
+                latest_event_indices[cursor.feed_index] = cursor.event_index;
+            }
             for (const auto& cursor : batch) {
                 const auto& feed = bucket.feeds[cursor.feed_index];
                 const auto& event = feed.events[cursor.event_index];
+                if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                    if (event.role != FeedRole::MAIN || !BacktestEventTraits<Tin>::tradable(event)) continue;
+                }
                 for (const auto strategy_index : subscribers[cursor.feed_index]) {
                     auto& state = states[strategy_index];
                     auto& position = state.positions[feed.id];
@@ -399,7 +529,7 @@ public:
                     execute_orders(ready_orders, event, account_currency_rate, timestamp,
                                    cash, position, lots, history, state.id_generator, *bucket.strategies[strategy_index].strategy);
                     for (const auto stop_lot_id : ready_stop_lots) state.pending_stop_lots.erase(stop_lot_id);
-                    execute_stop_losses(lots, event, account_currency_rate, timestamp, eligible_timestamp(timestamp), fill_latency_ms,
+                    execute_stop_losses(lots, event, account_currency_rate, timestamp, eligible_timestamp(timestamp, event), fill_latency_ms,
                                         waiting, state.pending_stop_lots, cash, position, history,
                                         state.id_generator, *bucket.strategies[strategy_index].strategy);
                     state.attribution_cash += cash - cash_before_execution;
@@ -407,31 +537,63 @@ public:
                 }
             }
 
+            if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                // Sub updates are queued for their owning strategies. They do
+                // not invoke on_data themselves; each queue is drained on the
+                // next event from its Main feed.
+                for (const auto& cursor : batch) {
+                    const auto& event = bucket.feeds[cursor.feed_index].events[cursor.event_index];
+                    if (event.role == FeedRole::MAIN) continue;
+                    for (const auto strategy_index : subscribers[cursor.feed_index]) {
+                        const auto role_index = static_cast<std::size_t>(event.role) - static_cast<std::size_t>(FeedRole::SUB1);
+                        pending_sub_events[strategy_index][event.main_feed_id][role_index].emplace_back(event);
+                    }
+                }
+            }
+
             for (const auto& cursor : batch) {
                 const auto& feed = bucket.feeds[cursor.feed_index];
                 const auto& event = feed.events[cursor.event_index];
+                if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                    // Main is the strategy's callback clock. Its context
+                    // carries all queued Sub updates received through this
+                    // timestamp.
+                    if (event.role != FeedRole::MAIN) continue;
+                }
                 for (const auto strategy_index : subscribers[cursor.feed_index]) {
                     const auto& binding = bucket.strategies[strategy_index];
                     auto& state = states[strategy_index];
-                    std::vector<StrategyContext::FeedView> feed_views;
-                    feed_views.reserve(subscription_order[strategy_index].size());
                     double equity = config_.capital_allocation == CAPITAL_ALLOCATION_MODE::SHARED
                         ? portfolio_equity()
                         : sleeve_equity(strategy_index);
-                    for (const auto subscribed_feed_index : subscription_order[strategy_index]) {
-                        const auto& subscribed_feed = bucket.feeds[subscribed_feed_index];
-                        const auto position_it = state.positions.find(subscribed_feed.id);
-                        const double position = position_it == state.positions.end() ? 0.0 : position_it->second;
-                        feed_views.push_back({subscribed_feed.id, latest_events[subscribed_feed_index], position});
+                    std::size_t position_feed_index = cursor.feed_index;
+                    if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                        position_feed_index = numeric_feed_indices.at(event.main_feed_id);
                     }
-                    const auto current_lots = state.open_lots.find(feed.id);
+                    const auto& position_feed = bucket.feeds[position_feed_index];
+                    const auto current_lots = state.open_lots.find(position_feed.id);
                     StrategyContext context;
-                    context.opos = state.positions[feed.id];
+                    context.opos = state.positions[position_feed.id];
                     context.equity = equity;
                     context.oposlog = current_lots == state.open_lots.end() ? std::vector<OrderEvent>{} : current_lots->second;
                     context.feed_id = feed.id;
-                    context.feeds = feed_views;
-                    context.account_currency_per_native_unit_ = feed.account_currency_rate(cursor.event_index);
+                    if constexpr (std::is_same_v<Tin, FeedEvent>) context.main_feed_id = event.main_feed_id;
+                    std::size_t currency_rate_event_index = cursor.event_index;
+                    if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                        currency_rate_event_index = latest_event_indices[position_feed_index];
+                    }
+                    context.account_currency_per_native_unit_ = currency_rate_event_index == std::numeric_limits<std::size_t>::max()
+                        ? 1.0
+                        : position_feed.account_currency_rate(currency_rate_event_index);
+                    StrategyContext::SubEventQueues* delivered_sub_events = nullptr;
+                    if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                        auto& queues = pending_sub_events[strategy_index];
+                        const auto queued = queues.find(event.feed_id);
+                        if (queued != queues.end()) {
+                            delivered_sub_events = &queued->second;
+                            context.queued_sub_events_ = delivered_sub_events;
+                        }
+                    }
                     state.orders.clear();
                     struct IndicatorCapture {
                         StrategyState* state;
@@ -460,9 +622,18 @@ public:
                     };
                     quantogral::detail::IndicatorTraceScope indicator_trace_scope(trace_indicator, &indicator_capture);
                     binding.strategy->on_data(event, context, state.orders);
+                    if (delivered_sub_events) {
+                        for (auto& queue : *delivered_sub_events) queue.clear();
+                    }
                     for (auto& order : state.orders) {
                         if (order.signal == SIGNAL::FLAT) continue;
-                        if (order.symbol.empty()) order.symbol = feed.id;
+                        if (order.symbol.empty()) {
+                            if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                                order.symbol = numeric_feed_names.at(event.main_feed_id);
+                            } else {
+                                order.symbol = feed.id;
+                            }
+                        }
                         const auto target_feed = feed_indices.find(order.symbol);
                         if (target_feed == feed_indices.end() || !subscribed_feeds[strategy_index].contains(target_feed->second)) {
                             order.ts = timestamp;
@@ -472,9 +643,26 @@ public:
                             state.results.hlog.push_back(order);
                             continue;
                         }
+                        if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                            if (feed_roles[target_feed->second] != FeedRole::MAIN) {
+                                order.ts = timestamp;
+                                order.strategy_id = binding.strategy->get_id();
+                                order.id = state.id_generator.next();
+                                reject(order, "orders can only target Main feeds");
+                                state.results.hlog.push_back(order);
+                                continue;
+                            }
+                        }
                         order.ts = timestamp;
                         order.strategy_id = binding.strategy->get_id();
-                        state.pending[order.symbol].push_back({std::move(order), eligible_timestamp(timestamp), -1});
+                        const Tin* execution_event = &event;
+                        if constexpr (std::is_same_v<Tin, FeedEvent>) {
+                            const auto* latest_execution_event = latest_events[target_feed->second];
+                            execution_event = latest_execution_event
+                                ? latest_execution_event
+                                : &bucket.feeds[target_feed->second].events.front();
+                        }
+                        state.pending[order.symbol].push_back({std::move(order), eligible_timestamp(timestamp, *execution_event), -1});
                     }
                 }
             }
@@ -752,14 +940,12 @@ private:
             exit_order.pid = it->id;
             exit_order.reason = "stop loss";
 
-            if constexpr (BacktestEventTraits<Tin>::supports_fill_latency) {
-                if (fill_latency_ms > 0) {
-                    exit_order.signal = it->signal == SIGNAL::LONG ? SIGNAL::SELL : SIGNAL::COVER;
-                    pending.push_back({std::move(exit_order), eligible_at, it->id});
-                    pending_stop_lots.insert(it->id);
-                    ++it;
-                    continue;
-                }
+            if (BacktestEventTraits<Tin>::supports_fill_latency(event) && fill_latency_ms > 0) {
+                exit_order.signal = it->signal == SIGNAL::LONG ? SIGNAL::SELL : SIGNAL::COVER;
+                pending.push_back({std::move(exit_order), eligible_at, it->id});
+                pending_stop_lots.insert(it->id);
+                ++it;
+                continue;
             }
 
             const double execution_price = BacktestEventTraits<Tin>::stop_fill_price(event, it->signal, stop);

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -13,7 +14,6 @@ import subprocess
 import tempfile
 import threading
 import uuid
-import csv
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -54,9 +54,9 @@ GENERATED_REGISTRY = BUILD_DIR / "quantogral_strategy_registry.generated.hpp"
 
 
 def discover_strategy_headers() -> dict[str, Path]:
-    """Find conventional OHLCV strategy classes and derive their configs from C++ fields."""
+    """Find FeedEvent strategy classes and derive their configs from C++ fields."""
     found: dict[str, Path] = {}
-    strategy_class = re.compile(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>")
+    strategy_class = re.compile(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*FeedEvent\s*>")
     if not STRATEGY_ROOT.is_dir():
         return found
     for header in sorted(STRATEGY_ROOT.rglob("*.hpp")):
@@ -81,7 +81,7 @@ def eligible_strategy_headers() -> dict[str, Path]:
     eligible = {}
     for identifier, header in discover_strategy_headers().items():
         source = header.read_text(encoding="utf-8")
-        match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>", source)
+        match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*FeedEvent\s*>", source)
         try:
             _strategy_config_fields(source, match.group(1), header)
         except (RuntimeError, ValueError):
@@ -103,7 +103,7 @@ def _matching_brace(source: str, opening: int) -> int:
 
 
 def _strategy_config_fields(source: str, class_name: str, header: Path) -> list[dict[str, Any]]:
-    class_match = re.search(rf"class\s+{re.escape(class_name)}\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>", source)
+    class_match = re.search(rf"class\s+{re.escape(class_name)}\s*:\s*public\s+Strategy\s*<\s*FeedEvent\s*>", source)
     if not class_match:
         raise RuntimeError(f"{header.name}: could not locate the strategy class body.")
     class_start = source.find("{", class_match.start())
@@ -202,13 +202,13 @@ def write_generated_registry(headers: list[Path]) -> None:
         output.append(f'#include "{header.relative_to(CPP_ROOT / "include").as_posix()}"')
     for identifier, header in ((re.sub(r"[^a-zA-Z0-9_]+", "_", path.stem).strip("_").lower(), path) for path in headers):
         source = header.read_text(encoding="utf-8")
-        class_match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>", source)
+        class_match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*FeedEvent\s*>", source)
         class_name = class_match.group(1)
         fields = _strategy_config_fields(source, class_name, header)
         config_alias = re.search(r"\busing\s+Config\s*=\s*([A-Za-z_]\w*)\s*;", source[source.find("{", class_match.start()):_matching_brace(source, source.find("{", class_match.start()))])
         config_type = config_alias.group(1)
         safe_id = re.sub(r"\W", "_", identifier)
-        factory = [f"inline std::unique_ptr<Strategy<OHLCVEvent>> qg_create_{safe_id}(const quantogral::StrategyValues& values) {{", f"    {config_type} config{{}};"]
+        factory = [f"inline std::unique_ptr<Strategy<FeedEvent>> qg_create_{safe_id}(const quantogral::StrategyValues& values) {{", f"    {config_type} config{{}};"]
         for item in fields:
             key = item["key"]
             cpp_path = item.get("_cppPath", key)
@@ -246,13 +246,13 @@ def strategy_catalog_from_headers() -> list[dict[str, Any]]:
     ]
     for identifier, header in eligible_strategy_headers().items():
         source = header.read_text(encoding="utf-8")
-        class_match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*OHLCVEvent\s*>", source)
+        class_match = re.search(r"class\s+([A-Za-z_]\w*)\s*:\s*public\s+Strategy\s*<\s*FeedEvent\s*>", source)
         fields = _strategy_config_fields(source, class_match.group(1), header)
         catalog.append({
             "id": identifier,
             "name": " ".join(word.capitalize() for word in identifier.split("_")),
             "file": header.relative_to(STRATEGY_ROOT.parent).as_posix(),
-            "input": "OHLCV",
+            "input": "Multi-event",
             "baseConfig": base_fields,
             "parameters": [{key: value for key, value in field.items() if not key.startswith("_")} for field in fields],
         })
@@ -818,12 +818,55 @@ def _read_ohlcv_frame(source: Path):
             break
         selected.append(original)
     if not selected:
+        normalized_columns = {"".join(character for character in name.lower() if character.isalnum()) for name in frame.columns}
+        if {"bid", "ask"}.issubset(normalized_columns):
+            raise ValueError("This file contains quote data, not OHLCV bars.")
+        if normalized_columns.intersection({"headline", "title", "news", "text", "message"}):
+            raise ValueError("This file contains news data, not OHLCV bars.")
         if not is_parquet:
             frame = pl.read_csv(source, has_header=False, infer_schema_length=10000, try_parse_dates=True)
         if frame.width < 6:
             raise ValueError("Market data must contain timestamp, open, high, low, close, and volume columns.")
         selected = frame.columns[:6]
     return frame.select(selected).rename(dict(zip(selected, ["timestamp", "open", "high", "low", "close", "volume"])))
+
+
+def _read_quote_frame(source: Path):
+    try:
+        import polars as pl
+    except ImportError as error:
+        raise RuntimeError("Reading quote data needs Polars. Run `uv sync` and restart Quantogral.") from error
+    is_parquet = source.suffix.lower() in {".parquet", ".pq"}
+    frame = pl.read_parquet(source) if is_parquet else pl.read_csv(source, infer_schema_length=10000, try_parse_dates=True)
+    normalized = {"".join(character for character in name.lower() if character.isalnum()): name for name in frame.columns}
+    timestamp = next((normalized.get(name) for name in ("timestamp", "timestamps", "ts", "time", "date", "datetime", "epoch") if normalized.get(name)), None)
+    bid = next((normalized.get(name) for name in ("bid", "bestbid") if normalized.get(name)), None)
+    ask = next((normalized.get(name) for name in ("ask", "bestask", "offer") if normalized.get(name)), None)
+    bid_size = next((normalized.get(name) for name in ("bidsize", "bidqty", "bidquantity") if normalized.get(name)), None)
+    ask_size = next((normalized.get(name) for name in ("asksize", "askqty", "askquantity") if normalized.get(name)), None)
+    if timestamp is None or bid is None or ask is None:
+        normalized_columns = set(normalized)
+        if normalized_columns.intersection({"headline", "title", "news", "text", "message"}):
+            raise ValueError("This file contains news data, not quote data.")
+        if is_parquet:
+            raise ValueError("Quote data must contain timestamp, bid, and ask columns.")
+        frame = pl.read_csv(source, has_header=False, infer_schema_length=10000, try_parse_dates=True)
+        if frame.width < 3:
+            raise ValueError("Quote data must contain timestamp, bid, and ask columns.")
+        timestamp, bid, ask = frame.columns[:3]
+        bid_size = frame.columns[3] if frame.width > 3 else None
+        ask_size = frame.columns[4] if frame.width > 4 else None
+    selected = [pl.col(timestamp).alias("timestamp"), pl.col(bid).alias("bid"), pl.col(ask).alias("ask")]
+    selected.append(pl.col(bid_size).alias("bidsize") if bid_size else pl.lit(0.0).alias("bidsize"))
+    selected.append(pl.col(ask_size).alias("asksize") if ask_size else pl.lit(0.0).alias("asksize"))
+    return frame.select(selected)
+
+
+def _read_market_frame(source: Path):
+    try:
+        return _read_ohlcv_frame(source), "OHLCV"
+    except ValueError:
+        return _read_quote_frame(source), "QUOTE"
 
 
 def _read_fx_rate_frame(source: Path):
@@ -912,13 +955,13 @@ def prepare_market_feed_csv(
     fx_source: Path | None = None, fx_settings: dict[str, Any] | None = None,
     asset_currency: str = "USD", base_currency: str = "USD",
     fx_cache: dict[tuple[str, str, str, str, str], tuple[list[tuple[int, float]], str, int]] | None = None,
-) -> int:
-    """Normalize timestamps and append a covered, resolution-compressed as-of FX multiplier."""
+) -> str:
+    """Normalize market-event rows and append an as-of FX multiplier where applicable."""
     if ts_unit not in {"SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"}:
         raise ValueError("Choose a supported numeric timestamp unit.")
     if date_format not in {"DDMMYYYY", "MMDDYYYY"}:
         raise ValueError("Choose a supported date order.")
-    assets = _read_ohlcv_frame(source)
+    assets, event_kind = _read_market_frame(source)
     asset_rows = assets.rows()
     parsed_assets = []
     for row_number, row in enumerate(asset_rows, 1):
@@ -984,9 +1027,15 @@ def prepare_market_feed_csv(
 
     with destination.open("w", encoding="utf-8", newline="") as output:
         writer = csv.writer(output)
-        writer.writerow(["timestamp", "open", "high", "low", "close", "volume", "currency_to_base"])
+        if event_kind == "OHLCV":
+            columns = ["timestamp", "open", "high", "low", "close", "volume"]
+        elif event_kind == "QUOTE":
+            columns = ["timestamp", "bid", "ask", "bidsize", "asksize"]
+        else:
+            columns = ["timestamp", "bid", "ask", "bidsize", "asksize"]
+        writer.writerow([*columns, "currency_to_base"])
         writer.writerows(converted_rows)
-    return len(converted_rows)
+    return event_kind
 
 
 def read_trade_chart(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1003,12 +1052,17 @@ def read_trade_chart(payload: dict[str, Any]) -> dict[str, Any]:
     if ts_unit not in {"SECONDS", "MILLISECONDS", "MICROSECONDS", "NANOSECONDS"} or date_format not in {"DDMMYYYY", "MMDDYYYY"}:
         raise ValueError("The linked data file has unsupported timestamp settings.")
     try:
-        rows = _read_ohlcv_frame(source).rows()
+        frame, event_kind = _read_market_frame(source)
+        rows = frame.rows()
         points = []
         for row_number, row in enumerate(rows, 1):
             try:
                 timestamp = _market_timestamp_ms(row[0], timezone_name, ts_unit, date_format)
-                ohlc = [float(value) for value in row[1:5]]
+                if event_kind == "QUOTE":
+                    mid = (float(row[1]) + float(row[2])) / 2.0
+                    ohlc = [mid, mid, mid, mid]
+                else:
+                    ohlc = [float(value) for value in row[1:5]]
             except (TypeError, ValueError, IndexError) as error:
                 raise ValueError(f"Could not read chart data at row {row_number}: {error}") from error
             if all(math.isfinite(value) for value in ohlc):
@@ -1039,18 +1093,31 @@ def read_benchmark_series(payload: dict[str, Any]) -> dict[str, Any]:
     except ImportError as error:
         raise RuntimeError("Reading reference data needs Polars. Run `uv sync` and restart Quantogral.") from error
     try:
-        parquet = source.suffix.lower() in {".parquet", ".pq"}
-        frame = pl.read_parquet(source) if parquet else pl.read_csv(source, infer_schema_length=10000, try_parse_dates=True)
-        normalized = {"".join(character for character in column.lower() if character.isalnum()): column for column in frame.columns}
-        timestamp_column = next((normalized.get(name) for name in ("timestamp", "timestamps", "datetime", "date", "time", "ts", "epoch") if normalized.get(name)), None)
-        price_column = next((normalized.get(name) for name in ("adjclose", "adjustedclose", "close", "price", "value", "nav") if normalized.get(name)), None)
-        if timestamp_column is None or price_column is None:
-            if not parquet:
-                frame = pl.read_csv(source, has_header=False, infer_schema_length=10000, try_parse_dates=True)
-            if frame.width < 2:
-                raise ValueError("Reference data needs a timestamp column and a price column such as Adj Close or Close.")
-            timestamp_column, price_column = frame.columns[:2]
-        rows = frame.select([pl.col(timestamp_column).alias("timestamp"), pl.col(price_column).alias("price")]).rows()
+        market_frame = None
+        event_kind = None
+        try:
+            market_frame, event_kind = _read_market_frame(source)
+        except ValueError:
+            pass
+        if event_kind == "QUOTE":
+            timestamp_column, price_column = "timestamp", "mid"
+            rows = market_frame.select([
+                pl.col("timestamp").alias("timestamp"),
+                ((pl.col("bid") + pl.col("ask")) / 2.0).alias("price"),
+            ]).rows()
+        else:
+            parquet = source.suffix.lower() in {".parquet", ".pq"}
+            frame = pl.read_parquet(source) if parquet else pl.read_csv(source, infer_schema_length=10000, try_parse_dates=True)
+            normalized = {"".join(character for character in column.lower() if character.isalnum()): column for column in frame.columns}
+            timestamp_column = next((normalized.get(name) for name in ("timestamp", "timestamps", "datetime", "date", "time", "ts", "epoch") if normalized.get(name)), None)
+            price_column = next((normalized.get(name) for name in ("adjclose", "adjustedclose", "close", "price", "value", "nav") if normalized.get(name)), None)
+            if timestamp_column is None or price_column is None:
+                if not parquet:
+                    frame = pl.read_csv(source, has_header=False, infer_schema_length=10000, try_parse_dates=True)
+                if frame.width < 2:
+                    raise ValueError("Reference data needs a timestamp column and a price column such as Adj Close or Close.")
+                timestamp_column, price_column = frame.columns[:2]
+            rows = frame.select([pl.col(timestamp_column).alias("timestamp"), pl.col(price_column).alias("price")]).rows()
     except ValueError:
         raise
     except Exception as error:
@@ -1125,6 +1192,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
     fx_rate_cache: dict[tuple[str, str, str, str, str], tuple[list[tuple[int, float]], str, int]] = {}
     instance_ids: set[str] = set()
     bucket_ids: set[str] = set()
+    next_numeric_feed_id = 1
     try:
         for bucket_index, raw_bucket in enumerate(buckets):
             if not isinstance(raw_bucket, dict):
@@ -1139,6 +1207,37 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
             bucket_ids.add(bucket_id)
             if not isinstance(feeds, list) or not feeds or not isinstance(strategies, list) or not strategies:
                 raise ValueError(f"Bucket {bucket_id} needs at least one feed and one strategy.")
+            feed_protocol: dict[str, dict[str, Any]] = {}
+            for feed in feeds:
+                if not isinstance(feed, dict):
+                    raise ValueError(f"Bucket {bucket_id} has an invalid data feed.")
+                feed_id = feed.get("id")
+                if not isinstance(feed_id, str) or not feed_id.strip() or feed_id in feed_protocol:
+                    raise ValueError(f"Bucket {bucket_id} data feed IDs must be non-empty and unique.")
+                role = feed.get("role", "MAIN")
+                if role not in {"MAIN", "SUB1", "SUB2", "SUB3"}:
+                    raise ValueError(f"Feed {feed_id} has an unsupported role.")
+                if next_numeric_feed_id > 255:
+                    raise ValueError("This backtest has more feeds than the current 8-bit FeedId can represent.")
+                feed_protocol[feed_id] = {
+                    "numericId": next_numeric_feed_id,
+                    "role": role,
+                    "mainFeedId": feed_id if role == "MAIN" else feed.get("mainFeedId"),
+                }
+                next_numeric_feed_id += 1
+            role_by_id = {feed_id: metadata["role"] for feed_id, metadata in feed_protocol.items()}
+            roles_by_main: set[tuple[str, str]] = set()
+            for feed_id, metadata in feed_protocol.items():
+                role = metadata["role"]
+                main_feed_id = metadata["mainFeedId"]
+                if role == "MAIN":
+                    continue
+                if not isinstance(main_feed_id, str) or role_by_id.get(main_feed_id) != "MAIN":
+                    raise ValueError(f"Subfeed {feed_id} must reference a Main feed in bucket {bucket_id}.")
+                role_key = (main_feed_id, role)
+                if role_key in roles_by_main:
+                    raise ValueError(f"Main feed {main_feed_id} has more than one {role}.")
+                roles_by_main.add(role_key)
             raw_fx_feeds = [] if ignore_currency else raw_bucket.get("fxFeeds", [])
             if not isinstance(raw_fx_feeds, list):
                 raise ValueError(f"Bucket {bucket_id} has invalid FX history settings.")
@@ -1152,14 +1251,13 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 available_fx.append({"path": fx_path, "settings": {**fx_metadata, "tsUnit": fx_feed.get("tsUnit", "MILLISECONDS"), "dateFormat": fx_feed.get("dateFormat", "DDMMYYYY")}})
             arguments.extend([bucket_id, str(len(feeds))])
             prepared_feeds = []
-            feed_ids: set[str] = set()
+            feed_ids: set[str] = set(feed_protocol)
             for feed_index, feed in enumerate(feeds):
-                if not isinstance(feed, dict):
-                    raise ValueError(f"Bucket {bucket_id} has an invalid data feed.")
                 feed_id = feed.get("id")
-                if not isinstance(feed_id, str) or not feed_id.strip() or feed_id in feed_ids:
-                    raise ValueError(f"Bucket {bucket_id} data feed IDs must be non-empty and unique.")
-                feed_ids.add(feed_id)
+                protocol = feed_protocol[feed_id]
+                role = protocol["role"]
+                main_feed_id = protocol["mainFeedId"]
+                main_numeric_id = feed_protocol[main_feed_id]["numericId"]
                 data_path = resolve_data_file(feed.get("path"))
                 ts_unit = feed.get("tsUnit", "MILLISECONDS")
                 date_format = feed.get("dateFormat", "DDMMYYYY")
@@ -1171,24 +1269,24 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 metadata = dataset_settings(relative_path)
                 asset_currency = metadata["currency"]
                 selected_fx = None
-                if not ignore_currency and asset_currency != base_currency:
+                if role == "MAIN" and not ignore_currency and asset_currency != base_currency:
                     selected_fx = next((item for item in available_fx if {item["settings"].get("fxBaseCurrency"), item["settings"].get("fxQuoteCurrency")} == {asset_currency, base_currency}), None)
                     if selected_fx is None:
                         raise ValueError(f"Bucket {bucket_id} needs user-provided FX history for {asset_currency}/{base_currency}. Add a matching FX file to this bucket.")
                 temp_dir = tempfile.TemporaryDirectory(prefix="quantogral-market-feed-", dir=BUILD_DIR)
                 temp_dirs.append(temp_dir)
                 runner_data_path = Path(temp_dir.name) / f"feed-{feed_index}.csv"
-                prepare_market_feed_csv(
+                event_kind = prepare_market_feed_csv(
                     data_path, runner_data_path,
                     timezone_name=metadata["timezone"], ts_unit=ts_unit, date_format=date_format,
                     fx_source=selected_fx["path"] if selected_fx else None,
                     fx_settings={**selected_fx["settings"], "baseCurrency": selected_fx["settings"].get("fxBaseCurrency"), "quoteCurrency": selected_fx["settings"].get("fxQuoteCurrency")} if selected_fx else None,
-                    asset_currency=asset_currency if not ignore_currency else base_currency,
+                    asset_currency=asset_currency if role == "MAIN" and not ignore_currency else base_currency,
                     base_currency=base_currency,
                     fx_cache=fx_rate_cache,
                 )
-                arguments.extend([feed_id, str(runner_data_path), "MILLISECONDS", "DDMMYYYY"])
-                prepared_feeds.append({"id": feed_id, "path": relative_path, "name": data_path.name, "tsUnit": ts_unit, "dateFormat": date_format, "currency": asset_currency, "timezone": metadata["timezone"]})
+                arguments.extend([feed_id, str(protocol["numericId"]), str(main_numeric_id), role, str(runner_data_path), "MILLISECONDS", "DDMMYYYY"])
+                prepared_feeds.append({"id": feed_id, "role": role, "mainFeedId": main_feed_id, "eventType": event_kind, "path": relative_path, "name": data_path.name, "tsUnit": ts_unit, "dateFormat": date_format, "currency": asset_currency, "timezone": metadata["timezone"]})
 
             arguments.append(str(len(strategies)))
             prepared_strategies = []
@@ -1210,7 +1308,7 @@ def run_backtest(payload: dict[str, Any]) -> dict[str, Any]:
                 values = {**(base if isinstance(base, dict) else {}), **(params if isinstance(params, dict) else {})}
                 strategy_meta = strategy_catalog.get(strategy_id)
                 if strategy_meta is None:
-                    raise ValueError(f"Strategy {strategy_id} is not a supported OHLCV strategy.")
+                    raise ValueError(f"Strategy {strategy_id} does not use the FeedEvent strategy interface.")
                 fields = {field["key"]: field for field in [*strategy_meta["baseConfig"], *strategy_meta["parameters"]]}
                 active_values = {}
                 for key, item in values.items():

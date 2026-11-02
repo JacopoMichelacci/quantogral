@@ -20,12 +20,12 @@ struct MACConfig {
     double slpct = -1.0;
     SizingConfig sizing = {};
 };
-class MAC : public Strategy<OHLCVEvent> {
+class MAC : public Strategy<FeedEvent> {
 public:
     using Config = MACConfig;
 
     MAC(const MACConfig& params_, StrategyConfig base_config = {})
-        : Strategy<OHLCVEvent>(detail::resolve_name("", __FILE__), base_config),
+        : Strategy<FeedEvent>(detail::resolve_name("", __FILE__), base_config),
           params(params_),
           fast_sma(params_.fast_len, 2),
           slow_sma(params_.slow_len, 2) {
@@ -54,12 +54,14 @@ public:
         }
     }
 
-    void on_data(const OHLCVEvent& input, const StrategyContext& ctx,
+    void on_data(const FeedEvent& event, const StrategyContext& ctx,
                  std::vector<OrderEvent>& out) override {
         if (!this->bconfig.active) return;
+        const auto* input = event.get_if<OHLCVEvent>();
+        if (!input || event.role != FeedRole::MAIN) return;
 
-        const double fast_price = get_price_field(input, params.fast_price_field);
-        const double slow_price = get_price_field(input, params.slow_price_field);
+        const double fast_price = get_price_field(*input, params.fast_price_field);
+        const double slow_price = get_price_field(*input, params.slow_price_field);
         fast_sma.update_buffer(fast_price);
         slow_sma.update_buffer(slow_price);
 
@@ -67,7 +69,7 @@ public:
 
         if (this->bconfig.long_active && fast_sma[-1] >= slow_sma[-1] && fast_sma[-2] < slow_sma[-2]) {
             if (!this->bconfig.stacking && ctx.opos > 0.0) return;
-            const double target_qty = calculate_qty(ctx, input.close);
+            const double target_qty = calculate_qty(ctx, input->close);
             const double buy_qty = ctx.opos < 0.0 ? target_qty - ctx.opos : target_qty;
             out.push_back({.signal = SIGNAL::BLONG, .type = ORDER_TYPE::MARKET, .qty = buy_qty,
                            .sl = StopLoss{.type = STOP_TYPE::HARD, .slnot = params.slnot, .slpct = params.slpct}});
@@ -75,7 +77,7 @@ public:
 
         if (this->bconfig.short_active && fast_sma[-1] <= slow_sma[-1] && fast_sma[-2] > slow_sma[-2]) {
             if (!this->bconfig.stacking && ctx.opos < 0.0) return;
-            const double target_qty = calculate_qty(ctx, input.close);
+            const double target_qty = calculate_qty(ctx, input->close);
             const double sell_qty = ctx.opos > 0.0 ? target_qty + ctx.opos : target_qty;
             out.push_back({.signal = SIGNAL::BSHORT, .type = ORDER_TYPE::MARKET, .qty = sell_qty,
                            .sl = StopLoss{.type = STOP_TYPE::HARD, .slnot = params.slnot, .slpct = params.slpct}});

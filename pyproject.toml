@@ -1,7 +1,7 @@
 [project]
 name = "quantogral"
 version = "0.1.0"
-description = "An open-source quantitative trading framework for developing, backtesting, and eventually deploying Python and C++ trading strategies."
+description = "A local-first quantitative research platform with C++ strategies and Python analysis."
 readme = "README.md"
 requires-python = ">=3.13"
 
@@ -12,15 +12,7 @@ authors = [
 ]
 
 dependencies = [
-    "matplotlib>=3.10.8",
-    "numpy>=2.4.3",
-    "pandas>=3.0.1",
     "polars>=1.39.3",
-    "pyarrow>=23.0.1",
-    "pybind11>=3.0.2",
-    "quantolib>=0.0.11",
-    "tqdm>=4.67.3",
-    "wrds>=3.1.6",
     "yfinance>=1.2.0",
 ]
 
@@ -30,9 +22,6 @@ Repository = "https://github.com/JacopoMichelacci/quantogral.git"
 
 [dependency-groups]
 dev = [
-    "cmake>=4.3.0",
     "pytest>=9.0.2",
-    "pytest-cov>=7.1.0",
     "ruff>=0.15.7",
-    "scikit-build-core>=0.12.2",
 ]

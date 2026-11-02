@@ -25,13 +25,9 @@ public:
     void on_data(const OHLCVEvent& input, const StrategyContext& context,
                  std::vector<OrderEvent>&) override {
         calls.emplace_back(std::string(context.feed_id), input.ts);
-        const auto* latest_a = dynamic_cast<const OHLCVEvent*>(context.latest_event("A"));
-        const auto* latest_b = dynamic_cast<const OHLCVEvent*>(context.latest_event("B"));
-        snapshots.emplace_back(latest_a ? latest_a->ts : -1, latest_b ? latest_b->ts : -1);
     }
 
     std::vector<std::pair<std::string, long long>> calls;
-    std::vector<std::pair<long long, long long>> snapshots;
 };
 
 class BuyOnceStrategy final : public Strategy<OHLCVEvent> {
@@ -122,7 +118,7 @@ private:
     bool sent_ = false;
 };
 
-void test_time_order_and_multi_feed_context() {
+void test_time_order_and_multi_feed_subscriptions() {
     const std::vector<OHLCVEvent> a{bar(10, 10, 11, 9, 10), bar(30, 12, 13, 11, 12)};
     const std::vector<OHLCVEvent> b{bar(20, 20, 21, 19, 20), bar(30, 22, 23, 21, 22)};
     RecordingStrategy a_only;
@@ -142,10 +138,6 @@ void test_time_order_and_multi_feed_context() {
     assert((pair.calls[1] == std::pair<std::string, long long>{"B", 20}));
     assert((pair.calls[2] == std::pair<std::string, long long>{"A", 30}));
     assert((pair.calls[3] == std::pair<std::string, long long>{"B", 30}));
-    assert((pair.snapshots[0] == std::pair<long long, long long>{10, -1}));
-    assert((pair.snapshots[1] == std::pair<long long, long long>{10, 20}));
-    assert((pair.snapshots[2] == std::pair<long long, long long>{30, 30}));
-    assert((pair.snapshots[3] == std::pair<long long, long long>{30, 30}));
     assert(result.equity_timestamps == std::vector<long long>({10, 20, 30}));
 }
 
@@ -380,7 +372,7 @@ void test_invalid_order_is_rejected_without_changing_equity() {
 } // namespace
 
 int main() {
-    test_time_order_and_multi_feed_context();
+    test_time_order_and_multi_feed_subscriptions();
     test_shared_capital_by_default();
     test_equal_capital_sleeves();
     test_plan_shares_capital_and_timeline_across_buckets();

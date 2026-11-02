@@ -1,13 +1,8 @@
 #pragma once
 
 #include <cstdint>
-#include <exception>
-#include <iostream>
 #include <ostream>
 #include <string>
-#include <vector>
-
-#include "utils/time.hpp"
 
 enum class MKT_EVENT_TYPE : std::uint8_t {
     OHLCV,
@@ -21,6 +16,34 @@ struct MarketEvent {
 
     virtual ~MarketEvent() = default;
 };
+
+enum class FeedRole : std::uint8_t {
+    MAIN = 0,
+    SUB1 = 1,
+    SUB2 = 2,
+    SUB3 = 3
+};
+
+// Non-owning view of one event delivered from a feed. The referenced event
+// must outlive this view (for example, the duration of a strategy callback).
+struct FeedEvent {
+    std::uint8_t feed_id;
+    // For a Main event this equals feed_id; for a Sub it identifies its parent Main.
+    std::uint8_t main_feed_id;
+    FeedRole role;
+    const MarketEvent& data;
+
+    FeedEvent(std::uint8_t id, std::uint8_t main_id, FeedRole feed_role,
+              const MarketEvent& event)
+        : feed_id(id), main_feed_id(main_id), role(feed_role), data(event) {}
+
+    // Returns this event as TEvent, or nullptr when its concrete type differs.
+    template <typename TEvent>
+    const TEvent* get_if() const noexcept {
+        return dynamic_cast<const TEvent*>(&data);
+    }
+};
+
 std::ostream& operator<<(std::ostream& os, MKT_EVENT_TYPE type);
 
 struct OHLCVEvent : public MarketEvent {
@@ -30,38 +53,6 @@ struct OHLCVEvent : public MarketEvent {
     double low = 0.0;
     double close = 0.0;
     double volume = 0.0;
-
-    static OHLCVEvent from_csv_row(const std::vector<std::string>& row) {
-        OHLCVEvent event;
-        if (row.size() < 6) {
-            std::cerr << "OHLCVEvent::from_csv_row: expected 6 columns, got " << row.size() << "\n";
-            return event;
-        }
-
-        try {
-            event.ts = to_epoch_ms(row[0]);
-        } catch (const std::exception& error) {
-            std::cerr << "OHLCVEvent::from_csv_row: invalid timestamp \"" << row[0]
-                      << "\": " << error.what() << "\n";
-        }
-
-        auto parse_double = [&row](std::size_t index, const char* field) {
-            try {
-                return std::stod(row[index]);
-            } catch (const std::exception& error) {
-                std::cerr << "OHLCVEvent::from_csv_row: invalid " << field << " \"" << row[index]
-                          << "\": " << error.what() << "\n";
-                return 0.0;
-            }
-        };
-
-        event.open = parse_double(1, "open");
-        event.high = parse_double(2, "high");
-        event.low = parse_double(3, "low");
-        event.close = parse_double(4, "close");
-        event.volume = parse_double(5, "volume");
-        return event;
-    }
 };
 std::ostream& operator<<(std::ostream& os, const OHLCVEvent& event);
 

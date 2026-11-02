@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 const DEFAULT_BUILDER_PATH = './cpp/include/builder'
@@ -9,6 +9,7 @@ const EXPLORER_SETTINGS_KEY = 'quantogral.projectExplorer.settings'
 const SITE_THEME_KEY = 'quantogral.siteTheme'
 const SIDEBAR_MIN_WIDTH = 220
 const SIDEBAR_MAX_WIDTH = 420
+const SUB_FEED_ROLES = ['SUB1', 'SUB2', 'SUB3']
 
 const FALLBACK_TIMEZONES = ['UTC', 'America/Chicago', 'America/Los_Angeles', 'America/New_York', 'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney']
 const TIMEZONE_OPTIONS = [...new Set(['UTC', ...(typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : FALLBACK_TIMEZONES)])]
@@ -1180,6 +1181,7 @@ function BucketAssetCorrelationTables({ scenarios, frequency }) {
     for (const scenario of scenarios) {
       for (const bucket of scenario.buckets || []) {
         for (const feed of bucket.feeds || []) {
+          if (feed.role !== 'MAIN') continue
           const key = `${feed.path}|${feed.tsUnit || 'MILLISECONDS'}|${feed.dateFormat || 'DDMMYYYY'}`
           if (!unique.has(key)) unique.set(key, { key, ...feed })
         }
@@ -1223,7 +1225,7 @@ function BucketAssetCorrelationTables({ scenarios, frequency }) {
       <h4>{scenario.scenarioLabel}</h4>
       {(scenario.buckets || []).map((bucket) => <section className="bucket-correlation-section" key={bucket.id}>
         <h4>{bucket.id}</h4>
-        {(bucket.feeds || []).map((feed) => {
+        {(bucket.feeds || []).filter((feed) => feed.role === 'MAIN').map((feed) => {
           const key = `${feed.path}|${feed.tsUnit || 'MILLISECONDS'}|${feed.dateFormat || 'DDMMYYYY'}`
           const reference = references[key]
           const connectedStrategies = (bucket.strategies || []).filter((strategy) => !Array.isArray(strategy.feedIds) || strategy.feedIds.includes(feed.id))
@@ -1280,7 +1282,7 @@ function BacktestReport({ scenarios, compare, benchmarkFiles }) {
     : [['portfolio', 'Portfolio'], ['correlation', 'Correlation']]
   const activePerformanceView = performanceViews.some(([id]) => id === performanceView) ? performanceView : 'portfolio'
   const indicatorColors = ['#a887ff', '#57b8ed', '#f1b654', '#ef7fab', '#52d1c3', '#a5c96b', '#ff8066', '#6f91ff', '#d47ce5', '#36b978', '#e6c84f', '#43c3c9']
-  const tradeSeriesOptions = (detailScenario.buckets || []).flatMap((bucket) => (bucket.feeds || []).map((feed) => {
+  const tradeSeriesOptions = (detailScenario.buckets || []).flatMap((bucket) => (bucket.feeds || []).filter((feed) => feed.role === 'MAIN').map((feed) => {
     const trades = (detailScenario.trades || []).filter((trade) => trade.bucketId === bucket.id && trade.feedId === feed.id)
     const indicators = (bucket.strategies || []).flatMap((strategy) => (strategy.indicators || []).filter((indicator) => indicator.feedId === feed.id).map((indicator) => ({ strategy, indicator }))).map(({ strategy, indicator }, index) => ({
       key: `${bucket.id}:${strategy.instanceId}:${indicator.name}:${index}`,
@@ -1372,17 +1374,29 @@ function BacktestBucketPanel({
   fxFiles, fxDropHover, baseCurrency, ignoreCurrency, onFxDragEnter, onFxDragLeave, onFxDrop, onRemoveFxFile, onUpdateFxFeed, onUpdateFxPair,
   strategyDropHover, dataDropHover, manualDataPath, onSelectBucket, onAddStrategy,
   onStrategyDragEnter, onStrategyDragLeave, onStrategyDrop, onDataDragEnter,
-  onDataDragLeave, onDataDrop, onToggleStrategy, onRemoveStrategy,
+  onDataDragLeave, onDataDrop, onAssignSubfeed, onDropSubfeed, onToggleStrategy, onRemoveStrategy,
   onToggleFeed, onUpdateStrategy, onRemoveFeed, onUpdateFeed,
   onManualPathChange, onManualPathKeyDown, onAddManualPath,
 }) {
   const [collapsedFeedSections, setCollapsedFeedSections] = useState({})
+  const [feedSettingsOpen, setFeedSettingsOpen] = useState({})
+  const [subfeedAssignmentOpen, setSubfeedAssignmentOpen] = useState({})
+  const [subfeedSelections, setSubfeedSelections] = useState({})
+  const [subfeedDropHover, setSubfeedDropHover] = useState(null)
   const [collapsed, setCollapsed] = useState(false)
-  const foreignCurrencies = [...new Set(dataFiles.map((feed) => feed.datasetSettings?.currency).filter((currency) => currency && currency !== baseCurrency))]
+  const mainFeeds = dataFiles.filter((feed) => (feed.role || 'MAIN') === 'MAIN')
+  const foreignCurrencies = [...new Set(mainFeeds.map((feed) => feed.datasetSettings?.currency).filter((currency) => currency && currency !== baseCurrency))]
   const coveredCurrencies = (fxFile) => foreignCurrencies.filter((currency) => {
     const pair = [fxFile.datasetSettings?.fxBaseCurrency, fxFile.datasetSettings?.fxQuoteCurrency]
     return pair.includes(currency) && pair.includes(baseCurrency)
   })
+  const renderFeedSettings = (feed, role) => {
+    return <div className="feed-role-settings">
+      <label className="feed-setting"><span>Numeric time</span><select onChange={(event) => onUpdateFeed(feed.instanceId, 'tsUnit', event.target.value)} value={feed.tsUnit}><option>SECONDS</option><option>MILLISECONDS</option><option>MICROSECONDS</option><option>NANOSECONDS</option></select></label>
+      <label className="feed-setting"><span>Date order</span><select onChange={(event) => onUpdateFeed(feed.instanceId, 'dateFormat', event.target.value)} value={feed.dateFormat}><option>DDMMYYYY</option><option>MMDDYYYY</option></select></label>
+      <small>{role === 'MAIN' ? 'Subfeeds are added below and receive their role in order.' : 'Sub events queue until the next Main update. Orders can target Main feeds only.'}</small>
+    </div>
+  }
   return (
     <section className="backtest-bucket">
       <div className="backtest-bucket-heading">
@@ -1402,7 +1416,7 @@ function BacktestBucketPanel({
       <section className="config-section assembly-section">
         <div className="config-section-heading"><h2>Strategies</h2><span>{strategies.length} added</span></div>
         <div
-          className={`assembly-drop-target strategy-assembly-target ${strategyDropHover ? 'is-drag-hovering' : ''}`}
+          className={`assembly-drop-target strategy-assembly-target ${strategies.length ? 'has-items' : ''} ${strategyDropHover ? 'is-drag-hovering' : ''}`}
           onDragEnter={(event) => onStrategyDragEnter(bucket.id, event)}
           onDragLeave={(event) => onStrategyDragLeave(bucket.id, event)}
           onDragOver={(event) => event.preventDefault()}
@@ -1431,10 +1445,15 @@ function BacktestBucketPanel({
                       <span className="tree-chevron">{feedsExpanded ? '⌄' : '›'}</span><h3>Connected feeds</h3><span>{strategy.feedIds.length} selected</span>
                     </button>
                     {feedsExpanded && (dataFiles.length ? <div className="feed-subscription-list">
-                      {dataFiles.map((feed) => <label className="feed-subscription-option" key={feed.instanceId}>
-                        <input checked={strategy.feedIds.includes(feed.instanceId)} onChange={() => onToggleFeed(strategy.instanceId, feed.instanceId)} type="checkbox" />
-                        <span>{feed.name}</span><small title={feed.path}>{feed.path}</small>
-                      </label>)}
+                      {dataFiles.map((feed) => {
+                        const isSubfeed = (feed.role || 'MAIN') !== 'MAIN'
+                        const parentFeed = isSubfeed ? dataFiles.find((item) => item.instanceId === feed.mainFeedId) : null
+                        const connected = isSubfeed ? strategy.feedIds.includes(feed.mainFeedId) : strategy.feedIds.includes(feed.instanceId)
+                        return <label className="feed-subscription-option" key={feed.instanceId}>
+                          <input checked={connected} disabled={isSubfeed} onChange={() => onToggleFeed(strategy.instanceId, feed.instanceId)} type="checkbox" />
+                          <span>{feed.name}{isSubfeed ? ` · ${feed.role} of ${parentFeed?.name || 'unassigned'}` : ''}</span><small title={feed.path}>{isSubfeed ? 'Queued for the next Main update' : feed.path}</small>
+                        </label>
+                      })}
                     </div> : <p className="input-help">Add a data feed to this bucket to connect it to the strategy.</p>)}
                   </section>
                   <section>
@@ -1457,19 +1476,79 @@ function BacktestBucketPanel({
       <section className="config-section assembly-section">
         <div className="config-section-heading"><h2>Data feeds</h2><span>{dataFiles.length} added · CSV or Parquet</span></div>
         <div
-          className={`assembly-drop-target data-assembly-target ${dataDropHover ? 'is-drag-hovering' : ''}`}
+          className={`assembly-drop-target data-assembly-target ${dataFiles.length ? 'has-items' : ''} ${dataDropHover ? 'is-drag-hovering' : ''}`}
           onDragEnter={(event) => onDataDragEnter(bucket.id, event)}
           onDragLeave={(event) => onDataDragLeave(bucket.id, event)}
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => onDataDrop(bucket.id, event)}
         >Drop data feeds here from the project explorer</div>
         {dataFiles.length > 0 && <div className="assembly-list data-file-list">
-          {dataFiles.map((feed) => <div className="data-file-row bucket-feed-row" key={feed.instanceId}>
-            <ScriptIcon /><span className="data-file-name" title={feed.path}>{feed.name}</span><span className="data-file-path">{feed.path}</span><span className="feed-market-meta" title={`Timezone: ${feed.datasetSettings?.timezone || 'UTC'}`}>{feed.datasetSettings?.currency || 'USD'}</span>
-            <label className="feed-setting"><span>Numeric time</span><select onChange={(event) => onUpdateFeed(feed.instanceId, 'tsUnit', event.target.value)} value={feed.tsUnit}><option>SECONDS</option><option>MILLISECONDS</option><option>MICROSECONDS</option><option>NANOSECONDS</option></select></label>
-            <label className="feed-setting"><span>Date order</span><select onChange={(event) => onUpdateFeed(feed.instanceId, 'dateFormat', event.target.value)} value={feed.dateFormat}><option>DDMMYYYY</option><option>MMDDYYYY</option></select></label>
-            <button aria-label={`Remove ${feed.name}`} className="remove-item-button" onClick={() => onRemoveFeed(feed.instanceId)} type="button">×</button>
-          </div>)}
+          {mainFeeds.map((feed) => {
+            const subfeeds = dataFiles.filter((item) => item.role !== 'MAIN' && item.mainFeedId === feed.instanceId)
+            const roleOpen = Boolean(feedSettingsOpen[feed.instanceId])
+            const subfeedOpen = Boolean(subfeedAssignmentOpen[feed.instanceId])
+            const nextSubRole = SUB_FEED_ROLES[subfeeds.length] || null
+            const assignableFeeds = mainFeeds.filter((item) => item.instanceId !== feed.instanceId && !dataFiles.some((child) => child.role !== 'MAIN' && child.mainFeedId === item.instanceId))
+            const subfeedSelection = subfeedSelections[feed.instanceId] || {}
+            const selectedSubfeed = assignableFeeds.find((item) => item.instanceId === subfeedSelection.feedId) || assignableFeeds[0]
+            return <div className="main-feed-block" key={feed.instanceId}>
+              <div className="data-file-row bucket-feed-row main-feed-row">
+                <ScriptIcon /><span className="data-file-name" title={feed.path}>{feed.name}</span><span className="data-file-path">{feed.path}</span><span className="feed-market-meta" title={`Timezone: ${feed.datasetSettings?.timezone || 'UTC'}`}>{feed.datasetSettings?.currency || 'USD'}</span>
+                <span className="feed-role-label is-main-feed">MAIN · TRADABLE</span>
+                <button
+                  aria-expanded={subfeedOpen}
+                  className={`secondary-button feed-add-subfeed-button ${subfeedDropHover === feed.instanceId ? 'is-drag-hovering' : ''}`}
+                  onClick={() => setSubfeedAssignmentOpen((current) => ({ ...current, [feed.instanceId]: !current[feed.instanceId] }))}
+                  onDragEnter={(event) => { if (Array.from(event.dataTransfer.types).includes('application/x-quantogral-data-file')) { event.preventDefault(); setSubfeedDropHover(feed.instanceId) } }}
+                  onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSubfeedDropHover((current) => current === feed.instanceId ? null : current) }}
+                  onDragOver={(event) => { if (Array.from(event.dataTransfer.types).includes('application/x-quantogral-data-file')) event.preventDefault() }}
+                  onDrop={(event) => {
+                    if (!Array.from(event.dataTransfer.types).includes('application/x-quantogral-data-file')) return
+                    setSubfeedDropHover(null)
+                    setSubfeedAssignmentOpen((current) => ({ ...current, [feed.instanceId]: false }))
+                    onDropSubfeed(bucket.id, feed.instanceId, event)
+                  }}
+                  title="Click to add a Subfeed or drop a data file here"
+                  type="button"
+                >+ Subfeed</button>
+                <button aria-expanded={roleOpen} aria-label={`Feed settings for ${feed.name}`} className="feed-role-settings-button" onClick={() => setFeedSettingsOpen((current) => ({ ...current, [feed.instanceId]: !current[feed.instanceId] }))} title="Feed settings" type="button">⚙</button>
+                <button aria-label={`Remove ${feed.name}`} className="remove-item-button" onClick={() => onRemoveFeed(feed.instanceId)} type="button">×</button>
+              </div>
+              {roleOpen && renderFeedSettings(feed, 'MAIN')}
+              {subfeedOpen && <div className="subfeed-assignment-panel">
+                <strong className="subfeed-assignment-title">Add a Subfeed to {feed.name}{nextSubRole ? ` · next role ${nextSubRole}` : ''}</strong>
+                {nextSubRole ? <>
+                  {assignableFeeds.length > 0 && <>
+                    <label className="feed-setting"><span>Existing Main feed</span><select onChange={(event) => setSubfeedSelections((current) => ({ ...current, [feed.instanceId]: { ...current[feed.instanceId], feedId: event.target.value } }))} value={selectedSubfeed?.instanceId || ''}>
+                      {assignableFeeds.map((item) => <option key={item.instanceId} value={item.instanceId}>{item.name}</option>)}
+                    </select></label>
+                    <button className="secondary-button" onClick={() => { onAssignSubfeed(selectedSubfeed.instanceId, feed.instanceId); setSubfeedAssignmentOpen((current) => ({ ...current, [feed.instanceId]: false })) }} type="button">Attach as {nextSubRole}</button>
+                  </>}
+                  <div
+                    className={`assembly-drop-target subfeed-drop-target ${subfeedDropHover === feed.instanceId ? 'is-drag-hovering' : ''}`}
+                    onDragEnter={(event) => { event.preventDefault(); setSubfeedDropHover(feed.instanceId) }}
+                    onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSubfeedDropHover((current) => current === feed.instanceId ? null : current) }}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => { setSubfeedDropHover(null); onDropSubfeed(bucket.id, feed.instanceId, event); setSubfeedAssignmentOpen((current) => ({ ...current, [feed.instanceId]: false })) }}
+                  >Drop a data file here to attach it as {nextSubRole}</div>
+                </> : <small>All three Sub slots are already used by this Main feed.</small>}
+                <button className="secondary-button subfeed-cancel-button" onClick={() => setSubfeedAssignmentOpen((current) => ({ ...current, [feed.instanceId]: false }))} type="button">Cancel</button>
+              </div>}
+              {subfeeds.length > 0 && <div className="subfeed-lines">
+                {subfeeds.map((subfeed) => {
+                  const subfeedSettingsOpen = Boolean(feedSettingsOpen[subfeed.instanceId])
+                  return <Fragment key={subfeed.instanceId}>
+                    <div className="subfeed-line">
+                      <span className="subfeed-line-label" title={subfeed.path}>{subfeed.role} · {subfeed.name}</span>
+                      <button aria-expanded={subfeedSettingsOpen} aria-label={`Settings for ${subfeed.role} subfeed ${subfeed.name}`} className="feed-role-settings-button" onClick={() => setFeedSettingsOpen((current) => ({ ...current, [subfeed.instanceId]: !current[subfeed.instanceId] }))} title="Subfeed settings" type="button">⚙</button>
+                      <button aria-label={`Remove ${subfeed.role} subfeed ${subfeed.name}`} className="remove-item-button" onClick={() => onRemoveFeed(subfeed.instanceId)} title="Remove Subfeed" type="button">×</button>
+                    </div>
+                    {subfeedSettingsOpen && renderFeedSettings(subfeed, subfeed.role)}
+                  </Fragment>
+                })}
+              </div>}
+            </div>
+          })}
         </div>}
         <div className="manual-data-entry">
           <input aria-label={`Market-data path for ${bucket.name}`} onChange={(event) => onManualPathChange(event.target.value)} onKeyDown={(event) => onManualPathKeyDown(bucket.id, event)} placeholder="Or enter a CSV / Parquet path" spellCheck="false" type="text" value={manualDataPath} />
@@ -1734,15 +1813,15 @@ function App() {
     else setBacktestError('That strategy is not available in the discovered C++ strategy catalog.')
   }
 
-  function addDataFile(path, name = path.split('/').pop(), bucketId = activeBucketId) {
+  function addDataFile(path, name = path.split('/').pop(), bucketId = activeBucketId, role = 'MAIN', mainFeedId = null, allowDuplicate = false) {
     if (!path) return
     const duplicate = dataFiles.find((item) => item.path === path && item.bucketId === bucketId)
-    if (duplicate) return
+    if (duplicate && !allowDuplicate) return
     dataInstanceCount.current += 1
     const instanceId = `feed-${dataInstanceCount.current}`
     const relativePath = path.replace(/^\.\/data\//, '')
     const metadata = datasetMetadata[relativePath] || { currency: 'USD', timezone: 'UTC', fxBaseCurrency: '', fxQuoteCurrency: '' }
-    setDataFiles((items) => [...items, { instanceId, bucketId, path, name, tsUnit: 'MILLISECONDS', dateFormat: 'DDMMYYYY', datasetSettings: metadata }])
+    setDataFiles((items) => [...items, { instanceId, bucketId, path, name, role, mainFeedId: role === 'MAIN' ? instanceId : mainFeedId, tsUnit: 'MILLISECONDS', dateFormat: 'DDMMYYYY', datasetSettings: metadata }])
     if (!datasetMetadata[relativePath]) {
       fetch(`/api/data/settings?path=${encodeURIComponent(relativePath)}`).then((response) => response.ok ? response.json() : null).then((settings) => {
         if (!settings) return
@@ -1750,8 +1829,9 @@ function App() {
         setDataFiles((items) => items.map((feed) => feed.instanceId === instanceId ? { ...feed, datasetSettings: settings } : feed))
       }).catch(() => {})
     }
+    const connectedFeedId = role === 'MAIN' ? instanceId : mainFeedId
     setBacktestStrategies((items) => items.map((item) => item.bucketId === bucketId
-      ? { ...item, feedIds: item.feedIds.includes(instanceId) ? item.feedIds : [...item.feedIds, instanceId] }
+      ? { ...item, feedIds: item.feedIds.includes(connectedFeedId) ? item.feedIds : [...item.feedIds, connectedFeedId] }
       : item))
     setBacktestResult(null)
     setBacktestError('')
@@ -1761,6 +1841,24 @@ function App() {
     event.preventDefault()
     const path = event.dataTransfer.getData('application/x-quantogral-data-file')
     if (path) addDataFile(path, path.replaceAll('\\', '/').split('/').pop(), bucketId)
+  }
+
+  function handleSubfeedDrop(bucketId, mainFeedId, event) {
+    event.preventDefault()
+    const path = event.dataTransfer.getData('application/x-quantogral-data-file')
+    if (!path) return
+    const existingSubfeeds = dataFiles
+      .filter((item) => item.role !== 'MAIN' && item.mainFeedId === mainFeedId)
+      .sort((left, right) => SUB_FEED_ROLES.indexOf(left.role) - SUB_FEED_ROLES.indexOf(right.role))
+    const role = SUB_FEED_ROLES[existingSubfeeds.length]
+    if (!role) {
+      const mainFeed = dataFiles.find((item) => item.instanceId === mainFeedId)
+      setBacktestError(`${mainFeed?.name || 'This Main feed'} already has all three Subfeed slots.`)
+      return
+    }
+    const compactedRoles = new Map(existingSubfeeds.map((feed, index) => [feed.instanceId, SUB_FEED_ROLES[index]]))
+    setDataFiles((items) => items.map((feed) => compactedRoles.has(feed.instanceId) ? { ...feed, role: compactedRoles.get(feed.instanceId) } : feed))
+    addDataFile(path, path.replaceAll('\\', '/').split('/').pop(), bucketId, role, mainFeedId, true)
   }
 
   async function handleFxDrop(bucketId, event) {
@@ -1797,14 +1895,70 @@ function App() {
   }
 
   function removeDataFile(instanceId) {
-    setDataFiles((items) => items.filter((item) => item.instanceId !== instanceId))
-    setBacktestStrategies((items) => items.map((item) => ({ ...item, feedIds: item.feedIds.filter((feedId) => feedId !== instanceId) })))
+    const feed = dataFiles.find((item) => item.instanceId === instanceId)
+    const removedIds = new Set([instanceId])
+    const parentMainId = feed && (feed.role || 'MAIN') !== 'MAIN' ? feed.mainFeedId : null
+    if (feed && (feed.role || 'MAIN') === 'MAIN') {
+      for (const subfeed of dataFiles) {
+        if (subfeed.role !== 'MAIN' && subfeed.mainFeedId === instanceId) removedIds.add(subfeed.instanceId)
+      }
+    }
+    setDataFiles((items) => {
+      const remaining = items.filter((item) => !removedIds.has(item.instanceId))
+      if (parentMainId) {
+        const siblings = remaining
+          .filter((item) => item.role !== 'MAIN' && item.mainFeedId === parentMainId)
+          .sort((left, right) => SUB_FEED_ROLES.indexOf(left.role) - SUB_FEED_ROLES.indexOf(right.role))
+        const rolesById = new Map(siblings.map((subfeed, index) => [subfeed.instanceId, SUB_FEED_ROLES[index]]))
+        return remaining.map((item) => rolesById.has(item.instanceId) ? { ...item, role: rolesById.get(item.instanceId) } : item)
+      }
+      return remaining
+    })
+    setBacktestStrategies((items) => items.map((item) => ({ ...item, feedIds: item.feedIds.filter((feedId) => !removedIds.has(feedId)) })))
     setBacktestResult(null)
   }
 
   function updateFeed(instanceId, key, value) {
     setDataFiles((items) => items.map((item) => item.instanceId === instanceId ? { ...item, [key]: value } : item))
     setBacktestResult(null)
+  }
+
+  function assignSubfeed(feedId, mainFeedId) {
+    const feed = dataFiles.find((item) => item.instanceId === feedId)
+    const mainFeed = dataFiles.find((item) => item.instanceId === mainFeedId && (item.role || 'MAIN') === 'MAIN')
+    if (!feed || !mainFeed || feed.instanceId === mainFeed.instanceId || feed.bucketId !== mainFeed.bucketId) {
+      setBacktestError('Choose a different data feed under a Main feed in the same bucket.')
+      return
+    }
+    if ((feed.role || 'MAIN') === 'MAIN' && dataFiles.some((item) => item.role !== 'MAIN' && item.mainFeedId === feed.instanceId)) {
+      setBacktestError(`Reassign the subfeeds attached to ${feed.name} before making it a Subfeed.`)
+      return
+    }
+    const existingSubfeeds = dataFiles
+      .filter((item) => item.role !== 'MAIN' && item.mainFeedId === mainFeedId)
+      .sort((left, right) => SUB_FEED_ROLES.indexOf(left.role) - SUB_FEED_ROLES.indexOf(right.role))
+    const role = SUB_FEED_ROLES[existingSubfeeds.length]
+    if (!role) {
+      setBacktestError(`${mainFeed.name} already has all three Subfeed slots.`)
+      return
+    }
+
+    const compactedRoles = new Map(existingSubfeeds.map((subfeed, index) => [subfeed.instanceId, SUB_FEED_ROLES[index]]))
+    setDataFiles((items) => items.map((item) => {
+      if (item.instanceId === feedId) return { ...item, role, mainFeedId }
+      return compactedRoles.has(item.instanceId) ? { ...item, role: compactedRoles.get(item.instanceId) } : item
+    }))
+    setBacktestStrategies((items) => items.map((strategy) => {
+      if (strategy.bucketId !== feed.bucketId) return strategy
+      const connectedToFeed = strategy.feedIds.includes(feedId)
+      if (!connectedToFeed) return strategy
+      const remainingFeedIds = strategy.feedIds.filter((id) => id !== feedId)
+      if ((feed.role || 'MAIN') === 'MAIN') remainingFeedIds.push(mainFeedId)
+      else if (!remainingFeedIds.includes(mainFeedId)) remainingFeedIds.push(mainFeedId)
+      return { ...strategy, feedIds: [...new Set(remainingFeedIds)] }
+    }))
+    setBacktestResult(null)
+    setBacktestError('')
   }
 
   function updateFxFeed(instanceId, key, value) {
@@ -1832,9 +1986,20 @@ function App() {
   }
 
   function toggleStrategyFeed(instanceId, feedId) {
-    setBacktestStrategies((items) => items.map((item) => item.instanceId === instanceId
-      ? { ...item, feedIds: item.feedIds.includes(feedId) ? item.feedIds.filter((id) => id !== feedId) : [...item.feedIds, feedId] }
-      : item))
+    const feed = dataFiles.find((item) => item.instanceId === feedId)
+    if (!feed) return
+    const role = feed.role || 'MAIN'
+    const relatedIds = role === 'MAIN'
+      ? [feed.instanceId, ...dataFiles.filter((item) => item.role !== 'MAIN' && item.mainFeedId === feed.instanceId).map((item) => item.instanceId)]
+      : [feed.instanceId, feed.mainFeedId]
+    setBacktestStrategies((items) => items.map((item) => {
+      if (item.instanceId !== instanceId) return item
+      const connecting = !item.feedIds.includes(feedId)
+      const feedIds = connecting
+        ? [...new Set([...item.feedIds, ...relatedIds.filter(Boolean)])]
+        : item.feedIds.filter((id) => !relatedIds.includes(id))
+      return { ...item, feedIds }
+    }))
     setBacktestResult(null)
   }
 
@@ -2521,6 +2686,8 @@ function App() {
             feeds: dataFiles.filter((feed) => feed.bucketId === bucket.id).map((feed) => ({
               id: feed.instanceId,
               path: feed.path,
+              role: feed.role || 'MAIN',
+              mainFeedId: feed.role === 'MAIN' || !feed.role ? feed.instanceId : feed.mainFeedId,
               tsUnit: feed.tsUnit,
               dateFormat: feed.dateFormat,
             })),
@@ -2839,6 +3006,8 @@ function App() {
                   onDataDragEnter={(bucketId, event) => { event.preventDefault(); setDataDropHoverBucket(bucketId) }}
                   onDataDragLeave={(bucketId, event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDataDropHoverBucket((current) => current === bucketId ? null : current) }}
                   onDataDrop={(bucketId, event) => { setDataDropHoverBucket(null); handleDataDrop(bucketId, event) }}
+                  onAssignSubfeed={assignSubfeed}
+                  onDropSubfeed={handleSubfeedDrop}
                   onToggleStrategy={(instanceId) => setExpandedBacktestStrategies((items) => ({ ...items, [instanceId]: !items[instanceId] }))}
                   onRemoveStrategy={(instanceId) => { setBacktestStrategies((items) => items.filter((item) => item.instanceId !== instanceId)); setBacktestResult(null) }}
                   onToggleFeed={toggleStrategyFeed}

@@ -84,8 +84,17 @@ struct OhlcvColumns {
     std::size_t volume = 5;
 };
 
-struct LoadedOhlcvFeed {
-    std::vector<OHLCVEvent> events;
+struct QuoteColumns {
+    std::size_t timestamp = 0;
+    std::size_t bid = 1;
+    std::size_t ask = 2;
+    std::optional<std::size_t> bid_size;
+    std::optional<std::size_t> ask_size;
+};
+
+struct LoadedFeed {
+    std::vector<std::unique_ptr<MarketEvent>> events;
+    std::vector<FeedEvent> feed_events;
     std::vector<double> account_currency_rates;
 };
 
@@ -104,6 +113,22 @@ std::optional<OhlcvColumns> detect_ohlcv_header(const std::vector<std::string>& 
         else if (name == "volume" || name == "vol" || name == "v") { columns.volume = i; has_volume = true; }
     }
     if (has_timestamp && has_open && has_high && has_low && has_close && has_volume) return columns;
+    return std::nullopt;
+}
+
+std::optional<QuoteColumns> detect_quote_header(const std::vector<std::string>& cells) {
+    QuoteColumns columns;
+    bool has_timestamp = false, has_bid = false, has_ask = false;
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        const auto name = normalized(cells[i]);
+        if (name == "timestamp" || name == "time" || name == "date" || name == "datetime" || name == "ts" || name == "epoch") {
+            columns.timestamp = i; has_timestamp = true;
+        } else if (name == "bid" || name == "bestbid") { columns.bid = i; has_bid = true; }
+        else if (name == "ask" || name == "bestask" || name == "offer") { columns.ask = i; has_ask = true; }
+        else if (name == "bidsize" || name == "bidqty" || name == "bidquantity") columns.bid_size = i;
+        else if (name == "asksize" || name == "askqty" || name == "askquantity") columns.ask_size = i;
+    }
+    if (has_timestamp && has_bid && has_ask) return columns;
     return std::nullopt;
 }
 
@@ -137,7 +162,37 @@ OHLCVEvent parse_ohlcv_row(const std::vector<std::string>& cells, const OhlcvCol
     return bar;
 }
 
-LoadedOhlcvFeed load_ohlcv_csv(const std::string& path, TS_UNIT unit, DATE_FORMAT format) {
+QuoteEvent parse_quote_row(const std::vector<std::string>& cells, const QuoteColumns& columns, TS_UNIT unit, DATE_FORMAT format, double& account_currency_rate) {
+    const auto largest_column = std::max({columns.timestamp, columns.bid, columns.ask,
+        columns.bid_size.value_or(0), columns.ask_size.value_or(0)});
+    if (cells.size() <= largest_column) throw std::runtime_error("Each quote row must contain timestamp, bid, and ask values.");
+    const auto number = [&cells](std::size_t column, const char* name) {
+        try {
+            std::size_t consumed = 0;
+            const double value = std::stod(cells[column], &consumed);
+            while (consumed < cells[column].size() && std::isspace(static_cast<unsigned char>(cells[column][consumed]))) ++consumed;
+            if (consumed != cells[column].size()) throw std::invalid_argument("trailing characters");
+            return value;
+        } catch (const std::exception&) {
+            throw std::runtime_error("column '" + std::string(name) + "' is not numeric (value '" + cells[column] + "').");
+        }
+    };
+    QuoteEvent quote;
+    quote.ts = parse_timestamp(cells[columns.timestamp], unit, format);
+    quote.bid = number(columns.bid, "bid");
+    quote.ask = number(columns.ask, "ask");
+    quote.bidsize = columns.bid_size ? number(*columns.bid_size, "bid_size") : 0.0;
+    quote.asksize = columns.ask_size ? number(*columns.ask_size, "ask_size") : 0.0;
+    account_currency_rate = cells.size() > largest_column + 1 && !cells[largest_column + 1].empty()
+        ? number(largest_column + 1, "conversion_rate") : 1.0;
+    if (!std::isfinite(quote.bid) || !std::isfinite(quote.ask) || !std::isfinite(quote.bidsize) ||
+        !std::isfinite(quote.asksize) || !std::isfinite(account_currency_rate) || account_currency_rate <= 0.0) {
+        throw std::runtime_error("Quote data contains a non-finite value or invalid backtester conversion rate.");
+    }
+    return quote;
+}
+
+LoadedFeed load_market_csv(const std::string& path, TS_UNIT unit, DATE_FORMAT format) {
     std::ifstream input(path);
     if (!input) throw std::runtime_error("Could not open the selected market-data file.");
 
@@ -149,20 +204,26 @@ LoadedOhlcvFeed load_ohlcv_csv(const std::string& path, TS_UNIT unit, DATE_FORMA
     }
     if (rows.empty()) throw std::runtime_error("The selected market-data file is empty.");
 
-    const auto header = detect_ohlcv_header(split_csv_row(rows.front()));
-    const std::size_t first_row = header ? 1 : 0;
-    const OhlcvColumns columns = header.value_or(OhlcvColumns{});
-    LoadedOhlcvFeed feed;
+    const auto first_cells = split_csv_row(rows.front());
+    const auto ohlcv_header = detect_ohlcv_header(first_cells);
+    const auto quote_header = detect_quote_header(first_cells);
+    const bool is_quote = !ohlcv_header && quote_header.has_value();
+    const std::size_t first_row = (ohlcv_header || quote_header) ? 1 : 0;
+    const OhlcvColumns ohlcv_columns = ohlcv_header.value_or(OhlcvColumns{});
+    const QuoteColumns quote_columns = quote_header.value_or(QuoteColumns{});
+    LoadedFeed feed;
     for (std::size_t i = first_row; i < rows.size(); ++i) {
         try {
             double rate = 1.0;
-            feed.events.push_back(parse_ohlcv_row(split_csv_row(rows[i]), columns, unit, format, rate));
+            const auto cells = split_csv_row(rows[i]);
+            if (is_quote) feed.events.push_back(std::make_unique<QuoteEvent>(parse_quote_row(cells, quote_columns, unit, format, rate)));
+            else feed.events.push_back(std::make_unique<OHLCVEvent>(parse_ohlcv_row(cells, ohlcv_columns, unit, format, rate)));
             feed.account_currency_rates.push_back(rate);
         } catch (const std::exception& error) {
             throw std::runtime_error("Could not read market-data row " + std::to_string(i + 1) + ": " + error.what());
         }
     }
-    if (feed.events.empty()) throw std::runtime_error("The selected market-data file contains no OHLCV rows.");
+    if (feed.events.empty()) throw std::runtime_error("The selected market-data file contains no market-event rows.");
     return feed;
 }
 
@@ -210,6 +271,14 @@ DATE_FORMAT parse_date_format(const std::string& value) {
     if (value == "DDMMYYYY") return DATE_FORMAT::DDMMYYYY;
     if (value == "MMDDYYYY") return DATE_FORMAT::MMDDYYYY;
     throw std::invalid_argument("Unsupported date format for data feed.");
+}
+
+FeedRole parse_feed_role(const std::string& value) {
+    if (value == "MAIN") return FeedRole::MAIN;
+    if (value == "SUB1") return FeedRole::SUB1;
+    if (value == "SUB2") return FeedRole::SUB2;
+    if (value == "SUB3") return FeedRole::SUB3;
+    throw std::invalid_argument("Unsupported feed role.");
 }
 
 TRADE_DIRECTION_MODE parse_direction_mode(const std::string& value) {
@@ -362,37 +431,49 @@ int main(int argc, char** argv) {
             }
         };
         const auto& registry = quantogral::strategy_registry();
-        BacktestPlan<OHLCVEvent> plan;
+        BacktestPlan<FeedEvent> plan;
         plan.buckets.reserve(bucket_count);
-        std::vector<std::vector<LoadedOhlcvFeed>> all_feed_data;
+        std::vector<std::vector<LoadedFeed>> all_feed_data;
         all_feed_data.reserve(bucket_count);
-        std::vector<std::unique_ptr<Strategy<OHLCVEvent>>> owned_strategies;
+        std::vector<std::unique_ptr<Strategy<FeedEvent>>> owned_strategies;
         CurrencyRateLookup currency_rates;
         std::size_t total_input_rows = 0;
         for (std::size_t bucket_index = 0; bucket_index < bucket_count; ++bucket_index) {
             require_arguments(2);
-            BacktestBucket<OHLCVEvent> bucket;
+            BacktestBucket<FeedEvent> bucket;
             bucket.id = argv[argument_index++];
             const auto feed_count = static_cast<std::size_t>(std::stoull(argv[argument_index++]));
             if (bucket.id.empty() || feed_count == 0) throw std::invalid_argument("Every configured bucket needs an ID and at least one feed.");
-            require_arguments(feed_count * 4 + 1);
-            std::vector<LoadedOhlcvFeed> feed_data;
+            require_arguments(feed_count * 7 + 1);
+            std::vector<LoadedFeed> feed_data;
             feed_data.reserve(feed_count);
             bucket.feeds.reserve(feed_count);
             for (std::size_t feed_index = 0; feed_index < feed_count; ++feed_index) {
                 const std::string feed_id = argv[argument_index++];
+                const auto numeric_feed_id_value = std::stoul(argv[argument_index++]);
+                const auto main_feed_id_value = std::stoul(argv[argument_index++]);
+                if (numeric_feed_id_value == 0 || numeric_feed_id_value > std::numeric_limits<std::uint8_t>::max() ||
+                    main_feed_id_value == 0 || main_feed_id_value > std::numeric_limits<std::uint8_t>::max()) {
+                    throw std::invalid_argument("Numeric feed IDs must be between 1 and 255.");
+                }
+                const auto numeric_feed_id = static_cast<std::uint8_t>(numeric_feed_id_value);
+                const auto main_feed_id = static_cast<std::uint8_t>(main_feed_id_value);
+                const auto feed_role = parse_feed_role(argv[argument_index++]);
                 const std::string data_path = argv[argument_index++];
                 const auto ts_unit = parse_ts_unit(argv[argument_index++]);
                 const auto date_format = parse_date_format(argv[argument_index++]);
-                feed_data.push_back(load_ohlcv_csv(data_path, ts_unit, date_format));
+                feed_data.push_back(load_market_csv(data_path, ts_unit, date_format));
                 auto& loaded_feed = feed_data.back();
                 total_input_rows += loaded_feed.events.size();
+                loaded_feed.feed_events.reserve(loaded_feed.events.size());
                 for (std::size_t event_index = 0; event_index < loaded_feed.events.size(); ++event_index) {
-                    currency_rates[feed_id][loaded_feed.events[event_index].ts] = loaded_feed.account_currency_rates[event_index];
+                    const auto& event = *loaded_feed.events[event_index];
+                    currency_rates[feed_id][event.ts] = loaded_feed.account_currency_rates[event_index];
+                    loaded_feed.feed_events.emplace_back(numeric_feed_id, main_feed_id, feed_role, event);
                 }
                 bucket.feeds.push_back({
                     feed_id,
-                    std::span<const OHLCVEvent>(loaded_feed.events),
+                    std::span<const FeedEvent>(loaded_feed.feed_events),
                     std::span<const double>(loaded_feed.account_currency_rates),
                 });
             }
@@ -427,7 +508,7 @@ int main(int argc, char** argv) {
             plan.buckets.push_back(std::move(bucket));
         }
         if (argument_index != argc) throw std::invalid_argument("Unexpected extra backtest runner arguments.");
-        Backtester<OHLCVEvent> backtester(config);
+        Backtester<FeedEvent> backtester(config);
         print_results(backtester.run(plan), total_input_rows, currency_rates);
         return 0;
     } catch (const std::exception& error) {

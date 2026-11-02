@@ -46,29 +46,21 @@ template <typename Tin>
 class Backtester;
 
 struct StrategyContext {
+    using SubEventQueues = std::array<std::vector<FeedEvent>, 3>;
+
     double opos = 0.0;
     double equity = 0.0;
     std::vector<OrderEvent> oposlog;
     std::string_view feed_id;
-    struct FeedView {
-        std::string_view id;
-        const MarketEvent* latest_event = nullptr;
-        double position = 0.0;
-    };
-    std::span<const FeedView> feeds;
+    std::uint8_t main_feed_id = 0;
 
-    const MarketEvent* latest_event(std::string_view id) const {
-        for (const auto& feed : feeds) {
-            if (feed.id == id) return feed.latest_event;
-        }
-        return nullptr;
-    }
-
-    double position_for(std::string_view id) const {
-        for (const auto& feed : feeds) {
-            if (feed.id == id) return feed.position;
-        }
-        return 0.0;
+    // Returns this Main callback's queued events for the requested Sub role.
+    // The span is valid only until on_data returns.
+    std::span<const FeedEvent> get_subfeed(std::uint8_t parent_main_id, FeedRole role) const {
+        if (parent_main_id != main_feed_id || role == FeedRole::MAIN || !queued_sub_events_) return {};
+        const auto role_index = static_cast<std::size_t>(role) - static_cast<std::size_t>(FeedRole::SUB1);
+        if (role_index >= queued_sub_events_->size()) return {};
+        return (*queued_sub_events_)[role_index];
     }
 
     double fixed_fractional_price_qty(double native_price, double equity_fraction) const {
@@ -81,6 +73,7 @@ struct StrategyContext {
 
 private:
     double account_currency_per_native_unit_ = 1.0;
+    const SubEventQueues* queued_sub_events_ = nullptr;
     template <typename Tin>
     friend class Backtester;
 };
